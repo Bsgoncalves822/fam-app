@@ -367,17 +367,11 @@ def lookup_comprovante(date_obj, valor, lookup):
     return results[0]
 
 def extract_cnpj_from_pdf(filename, zip_path):
-    """Extract recipient CNPJ from comprovante PDF, skipping FAM's own CNPJ."""
     try:
         with zipfile.ZipFile(zip_path, 'r') as zf: data = zf.read(filename)
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             text = '\n'.join(p.extract_text() or '' for p in pdf.pages[:2])
-        # Find all CNPJs in the PDF, return first one that isn't FAM's own
-        for m in CNPJ_RE.finditer(text):
-            cnpj = clean_cnpj(m.group())
-            if len(cnpj) == 14 and cnpj != FAM_OWN_CNPJ:
-                return cnpj
-        return None
+        return extract_cnpj(text)
     except: return None
 
 def batch_lookup_cnpjs(unknown_cnpjs, task_id, cnpj_cache):
