@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>FAM App - Reconciliação Bancária</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>FAM - Reconciliação Bancária</h1>
+
+        <div class="card">
+            <h2>1. Processar Arquivos</h2>
+            <div class="upload-grid">
+                <div class="dropzone" id="drop-sci">
+                    <p>SCI Bank CSV</p>
+                    <input type="file" id="file-sci" accept=".csv" hidden>
+                </div>
+                <div class="dropzone" id="drop-zip">
+                    <p>Comprovantes ZIP</p>
+                    <input type="file" id="file-zip" accept=".zip" hidden>
+                </div>
+            </div>
+            <button id="btn-process" disabled>Processar</button>
+            
+            <div class="log-box" id="log-box"></div>
+            <button id="btn-download" class="hidden" onclick="downloadFile()">Baixar Resultado Excel</button>
+        </div>
+
+        <div class="card">
+            <h2>2. Gerenciar Dados de Referência (CSV)</h2>
+            <p class="subtitle">Arraste um novo CSV para substituir a lista atual.</p>
+            
+            <div class="ref-grid">
+                <div class="ref-item">
+                    <h3>Funcionários</h3>
+                    <div class="dropzone-sm" id="drop-funcionarios">
+                        <input type="file" id="file-funcionarios" accept=".csv" hidden>
+                        <small>Arraste CSV aqui</small>
+                    </div>
+                    <div id="count-funcionarios" class="count"></div>
+                </div>
+                <div class="ref-item">
+                    <h3>Fornecedores</h3>
+                    <div class="dropzone-sm" id="drop-fornecedores">
+                        <input type="file" id="file-fornecedores" accept=".csv" hidden>
+                        <small>Arraste CSV aqui</small>
+                    </div>
+                    <div id="count-fornecedores" class="count"></div>
+                </div>
+                <div class="ref-item">
+                    <h3>Cheques</h3>
+                    <div class="dropzone-sm" id="drop-cheques">
+                        <input type="file" id="file-cheques" accept=".csv" hidden>
+                        <small>Arraste CSV aqui</small>
+                    </div>
+                    <div id="count-cheques" class="count"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

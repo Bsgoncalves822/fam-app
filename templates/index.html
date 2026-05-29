@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FAM · Reconciliação Bancária</title>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0d0f12; --surface: #141720; --surface2: #1c2030;
+            --border: #252a38; --border2: #2e3448;
+            --accent: #00d4ff; --green: #00e676; --yellow: #ffd740; --red: #ff5252;
+            --text: #e8ecf4; --muted: #6b7599; --muted2: #8892b0; --radius: 10px;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'IBM Plex Sans', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 32px 24px; }
+        body::before { content: ''; position: fixed; inset: 0; background-image: linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px); background-size: 40px 40px; pointer-events: none; z-index: 0; }
+        .container { max-width: 880px; margin: 0 auto; position: relative; z-index: 1; }
+
+        .header { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 36px; padding-bottom: 24px; border-bottom: 1px solid var(--border); }
+        .logo-area { display: flex; flex-direction: column; gap: 4px; }
+        .logo-tag { font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; color: var(--accent); letter-spacing: 3px; text-transform: uppercase; opacity: 0.8; }
+        .logo-title { font-size: 2rem; font-weight: 700; letter-spacing: -0.5px; line-height: 1; }
+        .logo-title span { color: var(--accent); }
+        .header-right { display: flex; align-items: center; gap: 12px; }
+        .status-pill { display: inline-flex; align-items: center; gap: 6px; background: var(--surface2); border: 1px solid var(--border2); padding: 6px 12px; border-radius: 20px; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; color: var(--muted2); }
+        .status-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1}50%{opacity:0.3} }
+        .btn-settings { background: var(--surface2); border: 1px solid var(--border2); color: var(--muted2); padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 0.82rem; transition: all 0.2s; }
+        .btn-settings:hover { border-color: var(--accent); color: var(--accent); }
+
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; margin-bottom: 20px; position: relative; overflow: hidden; }
+        .card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, var(--accent), transparent 60%); opacity: 0.4; }
+        .card-header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+        .card-num { font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; color: var(--accent); background: rgba(0,212,255,0.1); border: 1px solid rgba(0,212,255,0.2); padding: 3px 8px; border-radius: 4px; }
+        .card-title { font-size: 1rem; font-weight: 600; }
+
+        .upload-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+        .dropzone { border: 1.5px dashed var(--border2); border-radius: var(--radius); padding: 32px 20px; text-align: center; cursor: pointer; transition: all 0.2s; background: var(--surface2); }
+        .dropzone:hover, .dropzone.dragover { border-color: var(--accent); background: rgba(0,212,255,0.05); }
+        .dropzone.success { border-color: var(--green); border-style: solid; background: rgba(0,230,118,0.05); }
+        .dropzone.loading { opacity: 0.5; pointer-events: none; }
+        .drop-icon { font-size: 1.8rem; margin-bottom: 10px; display: block; }
+        .drop-label { font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; color: var(--accent); text-transform: uppercase; letter-spacing: 1.5px; display: block; margin-bottom: 6px; }
+        .drop-hint { font-size: 0.8rem; color: var(--muted); }
+        .dropzone.success .drop-hint { color: var(--green); font-weight: 500; }
+
+        .btn-process { width: 100%; padding: 16px; background: var(--accent); color: #000; border: none; border-radius: var(--radius); font-family: 'IBM Plex Sans', sans-serif; font-size: 0.95rem; font-weight: 700; letter-spacing: 0.5px; cursor: pointer; transition: all 0.2s; text-transform: uppercase; }
+        .btn-process:hover:not(:disabled) { background: #33dcff; transform: translateY(-1px); box-shadow: 0 4px 20px rgba(0,212,255,0.3); }
+        .btn-process:disabled { background: var(--border2); color: var(--muted); cursor: not-allowed; }
+
+        .log-box { background: #080a0e; border: 1px solid var(--border); border-radius: 8px; padding: 16px; height: 200px; overflow-y: auto; margin-top: 20px; font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; display: none; }
+        .log-box.active { display: block; }
+        .log-line { color: var(--muted2); margin-bottom: 5px; line-height: 1.5; }
+        .log-line::before { content: '> '; color: var(--accent); }
+        .log-line.done { color: var(--green); }
+        .log-line.error { color: var(--red); }
+
+        .btn-download { width: 100%; padding: 16px; background: transparent; color: var(--green); border: 1.5px solid var(--green); border-radius: var(--radius); font-family: 'IBM Plex Sans', sans-serif; font-size: 0.95rem; font-weight: 700; cursor: pointer; transition: all 0.2s; text-transform: uppercase; margin-top: 16px; display: none; }
+        .btn-download:hover { background: rgba(0,230,118,0.1); box-shadow: 0 0 20px rgba(0,230,118,0.2); }
+        .btn-download.visible { display: block; }
+
+        .ref-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+        .ref-item { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 16px; }
+        .ref-item-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+        .ref-name { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; color: var(--muted2); text-transform: uppercase; letter-spacing: 1px; }
+        .ref-count { font-family: 'IBM Plex Mono', monospace; font-size: 0.72rem; color: var(--accent); background: rgba(0,212,255,0.1); padding: 2px 8px; border-radius: 10px; }
+        .dropzone-sm { border: 1px dashed var(--border2); border-radius: 7px; padding: 14px 10px; text-align: center; cursor: pointer; transition: all 0.2s; font-size: 0.78rem; color: var(--muted); }
+        .dropzone-sm:hover { border-color: var(--accent); color: var(--accent); background: rgba(0,212,255,0.05); }
+
+        /* HISTORY */
+        .history-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+        .history-table th { font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; color: var(--accent); text-transform: uppercase; letter-spacing: 1px; padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+        .history-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); color: var(--muted2); }
+        .history-table tr:last-child td { border-bottom: none; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; }
+        .badge-green { background: rgba(0,230,118,0.15); color: var(--green); }
+        .badge-yellow { background: rgba(255,215,64,0.15); color: var(--yellow); }
+        .badge-red { background: rgba(255,82,82,0.15); color: var(--red); }
+
+        /* SETTINGS MODAL */
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 100; display: none; align-items: center; justify-content: center; }
+        .modal-overlay.open { display: flex; }
+        .modal { background: var(--surface); border: 1px solid var(--border2); border-radius: var(--radius); padding: 32px; width: 480px; max-width: 95vw; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+        .modal-title { font-size: 1rem; font-weight: 600; color: var(--text); }
+        .modal-close { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1.2rem; padding: 4px; }
+        .modal-close:hover { color: var(--text); }
+        .form-group { margin-bottom: 18px; }
+        .form-label { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 0.72rem; color: var(--muted2); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+        .form-input { width: 100%; background: var(--surface2); border: 1px solid var(--border2); border-radius: 7px; padding: 10px 14px; color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 0.85rem; transition: border-color 0.2s; }
+        .form-input:focus { outline: none; border-color: var(--accent); }
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+        .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border); }
+        .toggle-label { font-size: 0.88rem; color: var(--text); }
+        .toggle-sub { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
+        .toggle { position: relative; width: 44px; height: 24px; }
+        .toggle input { opacity: 0; width: 0; height: 0; }
+        .toggle-slider { position: absolute; inset: 0; background: var(--border2); border-radius: 24px; cursor: pointer; transition: 0.2s; }
+        .toggle-slider::before { content: ''; position: absolute; width: 18px; height: 18px; left: 3px; bottom: 3px; background: var(--muted); border-radius: 50%; transition: 0.2s; }
+        input:checked + .toggle-slider { background: rgba(0,212,255,0.3); }
+        input:checked + .toggle-slider::before { transform: translateX(20px); background: var(--accent); }
+        .btn-save { width: 100%; padding: 12px; background: var(--accent); color: #000; border: none; border-radius: 8px; font-weight: 700; cursor: pointer; margin-top: 20px; font-size: 0.9rem; transition: background 0.2s; }
+        .btn-save:hover { background: #33dcff; }
+        .save-msg { text-align: center; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; color: var(--green); margin-top: 10px; display: none; }
+
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <div class="header">
+        <div class="logo-area">
+            <span class="logo-tag">ORPROCON · FAM</span>
+            <h1 class="logo-title">Reconc<span>.</span></h1>
+        </div>
+        <div class="header-right">
+            <button class="btn-settings" onclick="openSettings()">⚙ Configurações</button>
+            <div class="status-pill"><span class="dot"></span>Sistema ativo</div>
+        </div>
+    </div>
+
+    <!-- 01: PROCESS -->
+    <div class="card">
+        <div class="card-header"><span class="card-num">01</span><span class="card-title">Processar Arquivos</span></div>
+        <div class="upload-grid">
+            <div class="dropzone" id="drop-sci">
+                <span class="drop-icon">📄</span>
+                <span class="drop-label">SCI Bank CSV</span>
+                <span class="drop-hint" id="hint-sci">Arraste ou clique para selecionar</span>
+                <input type="file" id="file-sci" accept=".csv" hidden>
+            </div>
+            <div class="dropzone" id="drop-zip">
+                <span class="drop-icon">🗜️</span>
+                <span class="drop-label">Comprovantes ZIP</span>
+                <span class="drop-hint" id="hint-zip">Arraste ou clique para selecionar</span>
+                <input type="file" id="file-zip" accept=".zip" hidden>
+            </div>
+        </div>
+        <button class="btn-process" id="btn-process" disabled>Processar</button>
+        <div class="log-box" id="log-box"></div>
+        <button class="btn-download" id="btn-download" onclick="downloadFile()">⬇ Baixar Resultado Excel</button>
+    </div>
+
+    <!-- 02: REFERENCE DATA -->
+    <div class="card">
+        <div class="card-header"><span class="card-num">02</span><span class="card-title">Dados de Referência</span></div>
+        <div class="ref-grid">
+            <div class="ref-item">
+                <div class="ref-item-header"><span class="ref-name">Funcionários</span><span class="ref-count" id="count-funcionarios">—</span></div>
+                <div class="dropzone-sm" id="drop-funcionarios"><input type="file" id="file-funcionarios" accept=".csv" hidden>Atualizar CSV</div>
+            </div>
+            <div class="ref-item">
+                <div class="ref-item-header"><span class="ref-name">Fornecedores</span><span class="ref-count" id="count-fornecedores">—</span></div>
+                <div class="dropzone-sm" id="drop-fornecedores"><input type="file" id="file-fornecedores" accept=".csv" hidden>Atualizar CSV</div>
+            </div>
+            <div class="ref-item">
+                <div class="ref-item-header"><span class="ref-name">Cheques</span><span class="ref-count" id="count-cheques">—</span></div>
+                <div class="dropzone-sm" id="drop-cheques"><input type="file" id="file-cheques" accept=".csv" hidden>Atualizar CSV</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 03: RUN HISTORY -->
+    <div class="card">
+        <div class="card-header"><span class="card-num">03</span><span class="card-title">Histórico de Execuções</span></div>
+        <table class="history-table">
+            <thead><tr><th>Data</th><th>Total</th><th>OK</th><th>Revisar</th><th>Não Encontrado</th><th>Novos Forn.</th></tr></thead>
+            <tbody id="history-body"><tr><td colspan="6" style="color:var(--muted);text-align:center;padding:20px">Carregando...</td></tr></tbody>
+        </table>
+    </div>
+
+</div>
+
+<!-- SETTINGS MODAL -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeSettingsOutside(event)">
+    <div class="modal">
+        <div class="modal-header">
+            <span class="modal-title">⚙ Configurações</span>
+            <button class="modal-close" onclick="closeSettings()">✕</button>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">Códigos de Transação</label>
+            <div class="form-row">
+                <div>
+                    <label class="form-label" style="font-size:0.65rem">Fornecedor</label>
+                    <input class="form-input" id="cfg-fornecedor" placeholder="148">
+                </div>
+                <div>
+                    <label class="form-label" style="font-size:0.65rem">Folha</label>
+                    <input class="form-input" id="cfg-folha" placeholder="6575">
+                </div>
+            </div>
+            <div style="margin-top:10px">
+                <label class="form-label" style="font-size:0.65rem">Não Identificado</label>
+                <input class="form-input" id="cfg-nao" placeholder="5">
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">Tolerância Comprovante (dias)</label>
+            <input class="form-input" id="cfg-tolerance" type="number" min="0" max="5" placeholder="1">
+        </div>
+
+        <div class="toggle-row">
+            <div>
+                <div class="toggle-label">ReceitaWS API</div>
+                <div class="toggle-sub">Busca nomes de empresas pelo CNPJ</div>
+            </div>
+            <label class="toggle">
+                <input type="checkbox" id="cfg-receita" checked>
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div class="form-group" style="margin-top:16px">
+            <label class="form-label">ReceitaWS — Requisições por minuto</label>
+            <input class="form-input" id="cfg-rpm" type="number" min="1" max="10" placeholder="3">
+        </div>
+
+        <button class="btn-save" onclick="saveSettings()">Salvar Configurações</button>
+        <div class="save-msg" id="save-msg">✓ Configurações salvas</div>
+    </div>
+</div>
+
+<script>
+let sciPath = null, zipPath = null, currentTaskId = null;
+
+function setupDrop(dropId, fileId, endpoint, onSuccess) {
+    const drop = document.getElementById(dropId);
+    const input = document.getElementById(fileId);
+    drop.addEventListener('click', () => input.click());
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('dragover'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
+    drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('dragover'); if (e.dataTransfer.files.length) uploadFile(e.dataTransfer.files[0], endpoint, drop, onSuccess); });
+    input.addEventListener('change', e => { if (e.target.files.length) uploadFile(e.target.files[0], endpoint, drop, onSuccess); });
+}
+
+async function uploadFile(file, endpoint, dropEl, onSuccess) {
+    dropEl.classList.add('loading');
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+        const res = await fetch(endpoint, { method: 'POST', body: fd });
+        const data = await res.json();
+        dropEl.classList.remove('loading');
+        if (data.path || data.success) { dropEl.classList.add('success'); onSuccess(data, file.name); }
+    } catch(e) { dropEl.classList.remove('loading'); }
+}
+
+setupDrop('drop-sci', 'file-sci', '/upload/sci', (data, name) => { sciPath = data.path; document.getElementById('hint-sci').textContent = name; checkReady(); });
+setupDrop('drop-zip', 'file-zip', '/upload/zip', (data, name) => { zipPath = data.path; document.getElementById('hint-zip').textContent = name; checkReady(); });
+
+function checkReady() { document.getElementById('btn-process').disabled = !(sciPath && zipPath); }
+
+document.getElementById('btn-process').addEventListener('click', async () => {
+    const logBox = document.getElementById('log-box');
+    const btnDown = document.getElementById('btn-download');
+    logBox.innerHTML = ''; logBox.classList.add('active');
+    btnDown.classList.remove('visible');
+    document.getElementById('btn-process').disabled = true;
+
+    const res = await fetch('/processar', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({sci_path: sciPath, zip_path: zipPath}) });
+    const task = await res.json();
+    currentTaskId = task.task_id;
+
+    const poll = setInterval(async () => {
+        const s = await (await fetch(`/status/${currentTaskId}`)).json();
+        logBox.innerHTML = s.log.map((l, i) => {
+            const isLast = i === s.log.length - 1;
+            const cls = s.status === 'ERROR' && isLast ? 'error' : (s.status === 'DONE' && isLast ? 'done' : '');
+            return `<div class="log-line ${cls}">${l}</div>`;
+        }).join('');
+        logBox.scrollTop = logBox.scrollHeight;
+        if (s.status === 'DONE' || s.status === 'ERROR') {
+            clearInterval(poll);
+            document.getElementById('btn-process').disabled = false;
+            if (s.status === 'DONE') { btnDown.classList.add('visible'); loadHistory(); }
+        }
+    }, 1500);
+});
+
+function downloadFile() { window.location.href = `/download/${currentTaskId}`; }
+
+// Reference data
+['funcionarios', 'fornecedores', 'cheques'].forEach(type => {
+    setupDrop(`drop-${type}`, `file-${type}`, `/data/${type}`, () => loadRefData());
+});
+
+async function loadRefData() {
+    for (const type of ['funcionarios', 'fornecedores', 'cheques']) {
+        try {
+            const res = await fetch(`/data/${type}`);
+            const data = await res.json();
+            document.getElementById(`count-${type}`).textContent = data.length > 0 ? data.length : '0';
+        } catch(e) {}
+    }
+}
+
+// Run history
+async function loadHistory() {
+    try {
+        const res = await fetch('/history');
+        const rows = await res.json();
+        const tbody = document.getElementById('history-body');
+        if (!rows.length) { tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:20px">Nenhuma execução ainda</td></tr>'; return; }
+        tbody.innerHTML = rows.map(r => `
+            <tr>
+                <td>${r.run_date ? r.run_date.split('T')[0] : r.run_date}</td>
+                <td>${r.total_rows}</td>
+                <td><span class="badge badge-green">${r.ok_count}</span></td>
+                <td><span class="badge badge-yellow">${r.revisar_count}</span></td>
+                <td><span class="badge badge-red">${r.nao_encontrado_count}</span></td>
+                <td>${r.novos_fornecedores}</td>
+            </tr>`).join('');
+    } catch(e) {}
+}
+
+// Settings
+async function openSettings() {
+    const res = await fetch('/config');
+    const cfg = await res.json();
+    document.getElementById('cfg-fornecedor').value = cfg.codigo_fornecedor || '148';
+    document.getElementById('cfg-folha').value = cfg.codigo_folha || '6575';
+    document.getElementById('cfg-nao').value = cfg.codigo_nao_identificado || '5';
+    document.getElementById('cfg-tolerance').value = cfg.comprovante_tolerance_days || 1;
+    document.getElementById('cfg-receita').checked = cfg.receita_ws_enabled !== false;
+    document.getElementById('cfg-rpm').value = cfg.receita_ws_rpm || 3;
+    document.getElementById('modal-overlay').classList.add('open');
+}
+
+function closeSettings() { document.getElementById('modal-overlay').classList.remove('open'); }
+function closeSettingsOutside(e) { if (e.target.id === 'modal-overlay') closeSettings(); }
+
+async function saveSettings() {
+    const cfg = {
+        codigo_fornecedor: document.getElementById('cfg-fornecedor').value,
+        codigo_folha: document.getElementById('cfg-folha').value,
+        codigo_nao_identificado: document.getElementById('cfg-nao').value,
+        comprovante_tolerance_days: parseInt(document.getElementById('cfg-tolerance').value),
+        receita_ws_enabled: document.getElementById('cfg-receita').checked,
+        receita_ws_rpm: parseInt(document.getElementById('cfg-rpm').value),
+    };
+    await fetch('/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(cfg) });
+    const msg = document.getElementById('save-msg');
+    msg.style.display = 'block';
+    setTimeout(() => { msg.style.display = 'none'; closeSettings(); }, 1500);
+}
+
+loadRefData();
+loadHistory();
+</script>
+</body>
+</html>

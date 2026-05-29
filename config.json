@@ -1,0 +1,9 @@
+{
+    "codigo_fornecedor": "148",
+    "codigo_folha": "6575",
+    "codigo_nao_identificado": "5",
+    "port": 5002,
+    "comprovante_tolerance_days": 1,
+    "receita_ws_enabled": true,
+    "receita_ws_rpm": 10
+}

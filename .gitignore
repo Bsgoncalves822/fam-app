@@ -1,0 +1,8 @@
+﻿uploads/
+outputs/
+logs/
+data/fam.db
+data/*.csv
+__pycache__/
+*.pyc
+patch*.py
