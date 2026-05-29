@@ -105,10 +105,12 @@ def init_db():
     logger.info("DB initialized")
 
 def migrate_csvs_to_db():
+    """Migrate CSVs to DB only if DB tables are empty — runs once."""
     data_dir = app.config['DATA_FOLDER']
     with get_db() as conn:
+        forn_count = conn.execute('SELECT COUNT(*) FROM fornecedores').fetchone()[0]
         forn_path = os.path.join(data_dir, 'fornecedores.csv')
-        if os.path.exists(forn_path):
+        if forn_count == 0 and os.path.exists(forn_path):
             df = pd.read_csv(forn_path, dtype=str).fillna('')
             count = 0
             for _, row in df.iterrows():
@@ -118,8 +120,10 @@ def migrate_csvs_to_db():
                     conn.execute('INSERT OR IGNORE INTO fornecedores (cnpj, nome, source) VALUES (?,?,?)', (cnpj, nome, 'CADASTRO'))
                     count += 1
             logger.info(f"Migrated {count} fornecedores")
+
+        func_count = conn.execute('SELECT COUNT(*) FROM funcionarios').fetchone()[0]
         func_path = os.path.join(data_dir, 'funcionarios.csv')
-        if os.path.exists(func_path):
+        if func_count == 0 and os.path.exists(func_path):
             df = pd.read_csv(func_path, dtype=str).fillna('')
             count = 0
             for _, row in df.iterrows():
@@ -128,8 +132,10 @@ def migrate_csvs_to_db():
                     conn.execute('INSERT OR IGNORE INTO funcionarios (nome) VALUES (?)', (nome,))
                     count += 1
             logger.info(f"Migrated {count} funcionarios")
+
+        cheq_count = conn.execute('SELECT COUNT(*) FROM cheques').fetchone()[0]
         cheq_path = os.path.join(data_dir, 'cheques.csv')
-        if os.path.exists(cheq_path):
+        if cheq_count == 0 and os.path.exists(cheq_path):
             df = pd.read_csv(cheq_path, dtype=str).fillna('')
             count = 0
             for _, row in df.iterrows():
@@ -152,8 +158,11 @@ def build_maps():
     cnpj_cache  = {row['cnpj']: row['nome'] for row in cache_rows}
     return forn_map, func_names, cheques_map, cnpj_cache
 
+# ── CNPJ / CPF extraction ────────────────────────────────────────────────────
+
 CNPJ_RE = re.compile(r'\b(\d{2}[\.\-]?\d{3}[\.\-]?\d{3}[\/]?\d{4}[\-]?\d{2}|\d{14})\b')
 CPF_RE  = re.compile(r'\b\d{3}[\.\-]?\d{3}[\.\-]?\d{3}[\-]?\d{2}\b')
+FAM_OWN_CNPJ = '04957294000103'   # FAM Metal's own CNPJ — self-transfers
 
 def clean_cnpj(raw): return re.sub(r'[^\d]', '', raw)
 
@@ -161,7 +170,8 @@ def extract_cnpj(text):
     text = str(text)
     m = CNPJ_RE.search(text)
     if m:
-        return clean_cnpj(m.group())
+        c = clean_cnpj(m.group())
+        return c
     m = re.search(r'(?<!\d)(\d{14})(?!\d)', text)
     if m:
         digits = m.group(1)
@@ -173,20 +183,122 @@ def extract_cpf(text):
     m = CPF_RE.search(str(text))
     return re.sub(r'[^\d]', '', m.group()) if m else None
 
-def parse_valor(v):
-    if not v: return 0.0
-    v = str(v).strip().replace('.', '').replace(',', '.')
-    try: return round(abs(float(v)), 2)
-    except: return 0.0
+def is_self_transfer(text):
+    """Returns True if the transaction is FAM paying itself."""
+    return FAM_OWN_CNPJ in re.sub(r'[^\d]', '', str(text))
 
-def parse_date(d_str):
-    try: return datetime.strptime(str(d_str).strip(), '%d/%m/%Y')
-    except: return None
+# ── Name extraction — covers ALL real SCI complemento patterns ───────────────
+
+def extract_name_from_complemento(text):
+    """
+    Extract supplier/payee name from Complemento field.
+    Returns (name: str | None, origin_hint: str | None)
+    origin_hint is one of: 'BOLETO_109', 'BOLETO_144_PIX', 'BOLETO_PREF',
+                            'PIX_SICREDI', 'TRANSF', 'TED', 'DEBITO_TED',
+                            'DEBITO_CONV', 'CARTAO', 'LIQUIDACAO', None
+    """
+    text = str(text).strip()
+    if not text:
+        return None, None
+
+    # ── patterns ordered most-specific → least-specific ─────────────────────
+
+    # 1. "109 Pagamento de Boleto NAME - ref"  (419 rows, name-only, no CNPJ)
+    m = re.match(
+        r'^109\s+Pagamento\s+de\s+Boleto\s+(.+?)\s*-\s*[\d\.]+\s*$',
+        text, re.IGNORECASE)
+    if m: return _clean(m.group(1)), 'BOLETO_109'
+
+    # 2. "144 Pix - Enviado NAME - ref"
+    m = re.match(
+        r'^144\s+Pix\s+-\s+Enviado\s+(.+?)\s*-\s*[\d\.]+\s*$',
+        text, re.IGNORECASE)
+    if m: return _clean(m.group(1)), 'BOLETO_144_PIX'
+
+    # 3. "Pagamento de Boleto NAME - ref"  (mixed case, no numeric prefix)
+    m = re.match(
+        r'^Pagamento\s+de\s+Boleto\s+(.+?)\s*-\s*[\d\.]+\s*$',
+        text, re.IGNORECASE)
+    if m: return _clean(m.group(1)), 'BOLETO_PREF'
+
+    # 4. "Pix - Enviado NAME - ref"
+    m = re.match(
+        r'^Pix\s+-\s+Enviado\s+(.+?)\s*-\s*[\d\.]+\s*$',
+        text, re.IGNORECASE)
+    if m: return _clean(m.group(1)), 'BOLETO_PREF'
+
+    # 5. "470 Transferência enviada NAME - ref" or "Transferência enviada NAME - ref"
+    m = re.match(
+        r'^(?:470\s+)?Transfer[eê]ncia\s+enviada\s+(.+?)\s*-\s*[\d\.]+(?:\.[\d]+)*\s*$',
+        text, re.IGNORECASE)
+    if m: return _clean(m.group(1)), 'TRANSF'
+
+    # 6. "TRANSF ENTRE CONTAS CNPJ NAME - ref"
+    m = re.match(
+        r'^TRANSF\s+ENTRE\s+CONTAS\s+\d+\s+(.+?)\s*-\s*\w+\d+\s*$',
+        text, re.IGNORECASE)
+    if m: return _clean(m.group(1)), 'TRANSF'
+
+    # 7. "TED Transf.Eletr.Disponiv BANK AGENCIA CNPJ NAME - - ref"
+    m = re.match(
+        r'^TED\s+Transf[\w\.]+\s+\d+\s+\d+\s+\d+\s+(.+?)\s*-\s*-\s*[\d\.]+\s*$',
+        text, re.IGNORECASE)
+    if m: return _clean(m.group(1)), 'TED'
+
+    # 8. "DEBITO TED/IB CNPJ NAME - ref"
+    m = re.match(
+        r'^DEBITO\s+TED/IB\s+\d+\s+(.+?)\s*-\s*\w+\d+\s*$',
+        text, re.IGNORECASE)
+    if m: return _clean(m.group(1)), 'DEBITO_TED'
+
+    # 9. "DEBITO CONVENIOS CNPJ NAME - NAME"
+    m = re.match(
+        r'^DEBITO\s+CONVENIOS\s+\d+\s+(.+?)\s*-\s*.+$',
+        text, re.IGNORECASE)
+    if m: return _clean(m.group(1)), 'DEBITO_CONV'
+
+    # 10. "Compra com Cartão NAME - ref"
+    m = re.match(
+        r'^Compra\s+com\s+Cart[aã]o\s+(.+?)\s*-\s*[\d\.]+\s*$',
+        text, re.IGNORECASE)
+    if m: return _clean(m.group(1)), 'CARTAO'
+
+    # 11. "PAGAMENTO PIX [SICREDI] CNPJ/CPF NAME - suffix"
+    #     Name comes AFTER the CNPJ/CPF token
+    m = re.match(
+        r'^PAGAMENTO\s+PIX(?:\s+SICREDI)?\s+[\d\.\/\-]+\s+(.+?)\s*-\s*(?:PIX_DEB|CX\w+|I\d+)\s*$',
+        text, re.IGNORECASE)
+    if m: return _clean(m.group(1)), 'PIX_SICREDI'
+
+    # 12. "LIQUIDACAO BOLETO [SICREDI] CNPJ NAME -"
+    m = re.match(
+        r'^LIQUIDACAO\s+BOLETO(?:\s+SICREDI)?\s+[\d\.\/\-]+\s+(.+?)\s*-\s*.*$',
+        text, re.IGNORECASE)
+    if m:
+        name = _clean(m.group(1))
+        if name:
+            # Strip parenthetical aliases like "(quero quero)"
+            name = re.sub(r'\s*\(.*?\)', '', name).strip()
+        if name:
+            return name, 'LIQUIDACAO'
+
+    return None, None
+
+
+def _clean(name):
+    """Strip trailing punctuation/spaces, uppercase, min length 2."""
+    name = str(name).strip().rstrip(' -').strip()
+    name = re.sub(r'\s+', ' ', name)
+    if len(name) < 2:
+        return None
+    return name.upper()
+
 
 def extract_pix_name(complemento):
+    """Legacy — kept for employee folha matching. Returns raw name after PIX CNPJ/CPF."""
     if not complemento: return None
     m = re.search(
-        r'(?:PAGAMENTO\s+)?PIX\s+(?:\w+\s+)?[\d.\/\-]+\s+(.+?)(?:\s+-\s*(?:PIX_|CX|I00).*)?$',
+        r'(?:PAGAMENTO\s+)?PIX(?:\s+SICREDI)?\s+[\d.\/\-]+\s+(.+?)(?:\s+-\s*(?:PIX_|CX|I00).*)?$',
         str(complemento).strip(), re.IGNORECASE
     )
     return m.group(1).strip().rstrip('- ').upper() if m else None
@@ -210,33 +322,14 @@ def extract_cheque_number(complemento):
     m = re.search(r'(\d{4})\s*$', str(complemento))
     return m.group(1) if m else None
 
-def extract_fallback_name(text):
-    if not text: return None
-    s = str(text).strip()
-    patterns = [
-        r'Pagamento\s+de\s+Boleto\s+([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*(?:-\s*[\d\.]+.*)?$',
-        r'LIQUIDACAO\s+BOLETO(?:\s+\w+)?\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-        r'PAG(?:AMENTO)?\s+(?:DE\s+)?BOLETO(?:\s+\w+)?\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-        r'PAGTO\s+BOLETO\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-        r'DEBITO\s+TED[\w\/]*\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-        r'TED\s+PARA\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-        r'Transfer\u00eancia\s+enviada\s+[\w\s]+?\s+-\s+[\d\.]+\s+([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-        r'PAGAMENTO\s+PIX(?:\s+\w+)?\s+[\d\.\/\-]+\s+([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, s, re.IGNORECASE)
-        if m:
-            name = m.group(1).strip().rstrip('- ')
-            if len(name) >= 4:
-                return name.upper()
-    return None
+def parse_valor(v):
+    if not v: return 0.0
+    v = str(v).strip().replace('.', '').replace(',', '.')
+    try: return round(abs(float(v)), 2)
+    except: return 0.0
 
-def extract_cnpj_from_pdf(filename, zip_path):
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zf: data = zf.read(filename)
-        with pdfplumber.open(io.BytesIO(data)) as pdf:
-            text = '\n'.join(p.extract_text() or '' for p in pdf.pages[:2])
-        return extract_cnpj(text)
+def parse_date(d_str):
+    try: return datetime.strptime(str(d_str).strip(), '%d/%m/%Y')
     except: return None
 
 def parse_filename(fname):
@@ -272,6 +365,14 @@ def lookup_comprovante(date_obj, valor, lookup):
     if not results: return None
     results.sort(key=lambda x: abs(x['delta']))
     return results[0]
+
+def extract_cnpj_from_pdf(filename, zip_path):
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf: data = zf.read(filename)
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            text = '\n'.join(p.extract_text() or '' for p in pdf.pages[:2])
+        return extract_cnpj(text)
+    except: return None
 
 def batch_lookup_cnpjs(unknown_cnpjs, task_id, cnpj_cache):
     cfg = load_config()
@@ -346,11 +447,13 @@ def build_excel(results, new_fornecedores, out_path, cfg):
     yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
     red_fill    = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     blue_fill   = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
+    grey_fill   = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
     for r in results:
         ws.append([r.get(k, '') for k in col_keys])
-        if r['STATUS'] == 'OK':           fill = green_fill
-        elif r['STATUS'] == 'REVISAR':    fill = blue_fill if r.get('ORIGEM') == 'RECEITA_WS' else yellow_fill
-        else:                             fill = red_fill
+        if r['STATUS'] == 'TRANSFERENCIA_PROPRIA': fill = grey_fill
+        elif r['STATUS'] == 'OK':                  fill = green_fill
+        elif r['STATUS'] == 'REVISAR':             fill = blue_fill if r.get('ORIGEM') == 'RECEITA_WS' else yellow_fill
+        else:                                       fill = red_fill
         for cell in ws[ws.max_row]:
             cell.fill      = fill
             cell.alignment = Alignment(vertical='center')
@@ -405,7 +508,7 @@ def run_fam_etl(task_id, sci_path, zip_path):
         unknown_cnpjs = set()
         for _, row in df.iterrows():
             cnpj = extract_cnpj(str(row.get('Complemento', '')))
-            if cnpj and len(cnpj) == 14 and cnpj not in forn_map:
+            if cnpj and len(cnpj) == 14 and cnpj not in forn_map and cnpj != FAM_OWN_CNPJ:
                 unknown_cnpjs.add(cnpj)
         log(f"{len(unknown_cnpjs)} CNPJs desconhecidos encontrados.")
 
@@ -419,6 +522,8 @@ def run_fam_etl(task_id, sci_path, zip_path):
         CODE_FOLHA = cfg['codigo_folha']
         CODE_NAO   = cfg['codigo_nao_identificado']
 
+        stat_counts = {'self': 0, 'cadastro': 0, 'receita': 0, 'comp_name': 0, 'folha': 0, 'cheque': 0, 'pdf': 0, 'nao': 0}
+
         for idx, row in df.iterrows():
             comp_text = str(row.get('Complemento', ''))
             hist_text = str(row.get('Historico', ''))
@@ -427,81 +532,110 @@ def run_fam_etl(task_id, sci_path, zip_path):
                 'Valor': row['Valor'], 'Debito': row['Debito'], 'Credito': row['Credito'],
                 'CODIGO': CODE_NAO, 'PARTICIPANTE': '', 'CNPJ_IDENTIFICADO': '',
                 'FOLHA': '', 'CHEQUE_NUM': '', 'COMPROVANTE': '',
-                'STATUS': 'NAO ENCONTRADO', 'ORIGEM': ''
+                'STATUS': 'NAO ENCONTRADO', 'ORIGEM': '', 'CONFIRMAR': ''
             }
+
+            # ── Self-transfer detection ──────────────────────────────────────
+            if is_self_transfer(comp_text):
+                res['STATUS']      = 'TRANSFERENCIA_PROPRIA'
+                res['PARTICIPANTE'] = 'FAM METAL (TRANSFERENCIA PROPRIA)'
+                res['ORIGEM']       = 'SELF'
+                res['CODIGO']       = ''
+                stat_counts['self'] += 1
+                results.append(res)
+                continue
 
             cnpj = extract_cnpj(comp_text)
             cpf  = extract_cpf(comp_text)
 
+            # ── A: CNPJ lookup ───────────────────────────────────────────────
             if cnpj and cnpj in forn_map:
                 res['PARTICIPANTE']      = forn_map[cnpj]
                 res['CNPJ_IDENTIFICADO'] = cnpj
                 res['ORIGEM']            = 'CADASTRO'
                 res['CODIGO']            = CODE_FORN
+                stat_counts['cadastro'] += 1
+
             elif cnpj and cnpj in cnpj_cache and cnpj_cache[cnpj]:
                 res['PARTICIPANTE']      = cnpj_cache[cnpj]
                 res['CNPJ_IDENTIFICADO'] = cnpj
                 res['ORIGEM']            = 'RECEITA_WS'
                 res['CODIGO']            = CODE_FORN
                 new_fornecedores[cnpj]   = cnpj_cache[cnpj]
+                stat_counts['receita'] += 1
+
             elif cnpj:
                 res['CNPJ_IDENTIFICADO'] = cnpj
-                fallback = extract_fallback_name(hist_text) or extract_fallback_name(comp_text)
-                if fallback:
-                    res['PARTICIPANTE'] = '(?) ' + fallback
-                    res['ORIGEM']       = 'COMPLEMENTO'
-                    res['CODIGO']       = CODE_FORN
+
             elif cpf:
                 res['CNPJ_IDENTIFICADO'] = 'CPF:' + cpf
-                fallback = extract_fallback_name(hist_text) or extract_fallback_name(comp_text)
-                if fallback:
-                    res['PARTICIPANTE'] = '(?) ' + fallback
-                    res['ORIGEM']       = 'COMPLEMENTO'
-                    res['CODIGO']       = CODE_FORN
-            else:
-                fallback = extract_fallback_name(hist_text) or extract_fallback_name(comp_text)
-                if fallback:
-                    res['PARTICIPANTE'] = '(?) ' + fallback
-                    res['ORIGEM']       = 'COMPLEMENTO'
-                    res['CODIGO']       = CODE_FORN
 
+            # ── B: Name extraction from Complemento text ─────────────────────
+            # Runs for ALL rows — fills PARTICIPANTE when CNPJ lookup missed
+            if not res['PARTICIPANTE']:
+                fallback_name, origin_hint = extract_name_from_complemento(comp_text)
+                if fallback_name:
+                    res['PARTICIPANTE'] = '(?) ' + fallback_name
+                    res['ORIGEM']       = origin_hint or 'COMPLEMENTO'
+                    res['CODIGO']       = CODE_FORN
+                    stat_counts['comp_name'] += 1
+
+            # ── C: PIX folha detection (employee name match) ─────────────────
             pix_name = extract_pix_name(comp_text)
-            if pix_name:
+            if pix_name and func_names:
                 is_folha, reason = match_employee_name(pix_name, func_names)
                 if is_folha:
                     res['FOLHA']  = 'SIM'
                     res['CODIGO'] = CODE_FOLHA
                     res['ORIGEM'] = 'FOLHA'
-                    if not res['PARTICIPANTE']:
+                    stat_counts['folha'] += 1
+                    if not res['PARTICIPANTE'] or res['PARTICIPANTE'].startswith('(?)'):
                         res['PARTICIPANTE'] = reason
 
-            if 'CHEQUE' in hist_text.upper() or 'CHEQUE' in comp_text.upper():
+            # ── D: Cheque lookup ─────────────────────────────────────────────
+            if 'CHEQUE' in comp_text.upper():
                 ch_num = extract_cheque_number(comp_text)
                 if ch_num and ch_num in cheques_map:
                     portador = cheques_map[ch_num]
                     res['CHEQUE_NUM']   = ch_num
                     res['PARTICIPANTE'] = portador
                     res['ORIGEM']       = 'CHEQUE'
+                    stat_counts['cheque'] += 1
                     if any(k in portador.upper() for k in ['SALARIO','FAM METAL']):
                         res['CODIGO'] = CODE_FOLHA
                         res['FOLHA']  = 'SIM'
                     else:
                         res['CODIGO'] = CODE_FORN
 
+            # ── E: Comprovante match by date+value ───────────────────────────
             dt_obj = parse_date(row['Data'])
             comp_match = lookup_comprovante(dt_obj, row['Valor_Float'], comp_lookup)
             if comp_match:
                 res['COMPROVANTE'] = comp_match['filename']
-                if not res['PARTICIPANTE']:
+                if not res['PARTICIPANTE'] or res['PARTICIPANTE'].startswith('(?)'):
                     pdf_cnpj = extract_cnpj_from_pdf(comp_match['filename'], zip_path)
                     if pdf_cnpj and pdf_cnpj in forn_map:
                         res['PARTICIPANTE']      = forn_map[pdf_cnpj]
                         res['CNPJ_IDENTIFICADO'] = pdf_cnpj
                         res['ORIGEM']            = 'PDF'
                         res['CODIGO']            = CODE_FORN
+                        stat_counts['pdf'] += 1
 
-            if res['PARTICIPANTE'] and res['COMPROVANTE']:   res['STATUS'] = 'OK'
-            elif res['PARTICIPANTE'] or res['COMPROVANTE']:  res['STATUS'] = 'REVISAR'
+            # ── Status ───────────────────────────────────────────────────────
+            has_participant = bool(res['PARTICIPANTE']) and res['PARTICIPANTE'] != '(?) '
+            has_comprovante = bool(res['COMPROVANTE'])
+
+            # Strip the (?) prefix from PARTICIPANTE if we also have a comprovante
+            # — confirmed enough to be OK
+            if has_participant and res['PARTICIPANTE'].startswith('(?)') and has_comprovante:
+                res['PARTICIPANTE'] = res['PARTICIPANTE'][4:]
+
+            if has_participant and has_comprovante:
+                res['STATUS'] = 'OK'
+            elif has_participant or has_comprovante:
+                res['STATUS'] = 'REVISAR'
+            else:
+                stat_counts['nao'] += 1
 
             results.append(res)
 
@@ -515,10 +649,11 @@ def run_fam_etl(task_id, sci_path, zip_path):
         out_path = os.path.join(app.config['OUTPUT_FOLDER'], f"{task_id}.xlsx")
         build_excel(results, new_fornecedores, out_path, cfg)
 
-        ok_c  = sum(1 for r in results if r['STATUS'] == 'OK')
-        rev_c = sum(1 for r in results if r['STATUS'] == 'REVISAR')
-        nao_c = sum(1 for r in results if r['STATUS'] == 'NAO ENCONTRADO')
-        total = len(results)
+        ok_c   = sum(1 for r in results if r['STATUS'] == 'OK')
+        rev_c  = sum(1 for r in results if r['STATUS'] == 'REVISAR')
+        nao_c  = sum(1 for r in results if r['STATUS'] == 'NAO ENCONTRADO')
+        self_c = sum(1 for r in results if r['STATUS'] == 'TRANSFERENCIA_PROPRIA')
+        total  = len(results)
 
         with get_db() as conn:
             conn.execute('INSERT INTO run_history (total_rows,ok_count,revisar_count,nao_encontrado_count,novos_fornecedores) VALUES (?,?,?,?,?)',
@@ -526,7 +661,9 @@ def run_fam_etl(task_id, sci_path, zip_path):
 
         tasks[task_id]['status'] = 'DONE'
         tasks[task_id]['file']   = out_path
-        log(f"OK: {ok_c} ({ok_c/total*100:.1f}%) | REVISAR: {rev_c} ({rev_c/total*100:.1f}%) | NAO ENCONTRADO: {nao_c} ({nao_c/total*100:.1f}%)")
+        log(f"--- RESUMO ---")
+        log(f"OK: {ok_c} ({ok_c/total*100:.1f}%) | REVISAR: {rev_c} ({rev_c/total*100:.1f}%) | NAO ENCONTRADO: {nao_c} ({nao_c/total*100:.1f}%) | PROPRIA: {self_c}")
+        log(f"Origens — CADASTRO: {stat_counts['cadastro']} | RECEITA_WS: {stat_counts['receita']} | COMPLEMENTO: {stat_counts['comp_name']} | FOLHA: {stat_counts['folha']} | CHEQUE: {stat_counts['cheque']} | PDF: {stat_counts['pdf']} | SELF: {stat_counts['self']} | NAO: {stat_counts['nao']}")
         log(f"Novos fornecedores via API: {len(new_fornecedores)}")
         log("Processamento concluido com sucesso!")
 
