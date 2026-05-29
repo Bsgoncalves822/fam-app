@@ -1,8 +1,24 @@
-﻿uploads/
+﻿# Runtime data
+uploads/
 outputs/
 logs/
 data/fam.db
 data/*.csv
+
+# Config (company-specific)
+config.json
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+
+# Patch scripts
 patch*.py
+
+# Backups
+*.bak
+
+# OS
+.DS_Store
+Thumbs.db
