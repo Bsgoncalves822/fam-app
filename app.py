@@ -366,12 +366,17 @@ def lookup_comprovante(date_obj, valor, lookup):
     results.sort(key=lambda x: abs(x['delta']))
     return results[0]
 
-def extract_cnpj_from_pdf(filename, zip_path):
+def extract_cnpj_from_pdf(filename, open_zf):
+    """Extract recipient CNPJ from comprovante PDF using an already-open ZipFile handle."""
     try:
-        with zipfile.ZipFile(zip_path, 'r') as zf: data = zf.read(filename)
+        data = open_zf.read(filename)
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             text = '\n'.join(p.extract_text() or '' for p in pdf.pages[:2])
-        return extract_cnpj(text)
+        for m in CNPJ_RE.finditer(text):
+            cnpj = clean_cnpj(m.group())
+            if len(cnpj) == 14 and cnpj != FAM_OWN_CNPJ:
+                return cnpj
+        return None
     except: return None
 
 def batch_lookup_cnpjs(unknown_cnpjs, task_id, cnpj_cache):
@@ -523,8 +528,10 @@ def run_fam_etl(task_id, sci_path, zip_path):
         CODE_NAO   = cfg['codigo_nao_identificado']
 
         stat_counts = {'self': 0, 'cadastro': 0, 'receita': 0, 'comp_name': 0, 'folha': 0, 'cheque': 0, 'pdf': 0, 'nao': 0}
+        total_rows = len(df)
 
-        for idx, row in df.iterrows():
+        with zipfile.ZipFile(zip_path, 'r') as open_zf:
+         for idx, row in df.iterrows():
             comp_text = str(row.get('Complemento', ''))
             hist_text = str(row.get('Historico', ''))
             res = {
@@ -613,7 +620,7 @@ def run_fam_etl(task_id, sci_path, zip_path):
             if comp_match:
                 res['COMPROVANTE'] = comp_match['filename']
                 if not res['PARTICIPANTE'] or res['PARTICIPANTE'].startswith('(?)'):
-                    pdf_cnpj = extract_cnpj_from_pdf(comp_match['filename'], zip_path)
+                    pdf_cnpj = extract_cnpj_from_pdf(comp_match['filename'], open_zf)
                     if pdf_cnpj and pdf_cnpj in forn_map:
                         res['PARTICIPANTE']      = forn_map[pdf_cnpj]
                         res['CNPJ_IDENTIFICADO'] = pdf_cnpj
@@ -638,7 +645,11 @@ def run_fam_etl(task_id, sci_path, zip_path):
                 stat_counts['nao'] += 1
 
             results.append(res)
+            if (idx + 1) % 1000 == 0:
+                pct = (idx + 1) / total_rows * 100
+                tasks[task_id]['log'][-1] = f"Enriquecendo transacoes... {idx+1}/{total_rows} ({pct:.0f}%)"
 
+        # end of open_zf context
         if new_fornecedores:
             with get_db() as conn:
                 for cnpj, nome in new_fornecedores.items():
@@ -656,8 +667,8 @@ def run_fam_etl(task_id, sci_path, zip_path):
         total  = len(results)
 
         with get_db() as conn:
-            conn.execute('INSERT INTO run_history (total_rows,ok_count,revisar_count,nao_encontrado_count,novos_fornecedores) VALUES (?,?,?,?,?)',
-                        (total, ok_c, rev_c, nao_c, len(new_fornecedores)))
+            conn.execute('INSERT INTO run_history (run_date,total_rows,ok_count,revisar_count,nao_encontrado_count,novos_fornecedores) VALUES (?,?,?,?,?,?)',
+                        (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), total, ok_c, rev_c, nao_c, len(new_fornecedores)))
 
         tasks[task_id]['status'] = 'DONE'
         tasks[task_id]['file']   = out_path
@@ -756,6 +767,30 @@ def update_data(ref_type):
                 por = row.get('Portador', '').strip()
                 if num and por:
                     conn.execute('INSERT OR REPLACE INTO cheques (numero, portador) VALUES (?,?)', (num, por))
+    return jsonify({"success": True})
+
+@app.route('/data/<ref_type>/delete', methods=['POST'])
+def delete_data(ref_type):
+    if ref_type not in ['funcionarios', 'fornecedores', 'cheques']:
+        return jsonify({"error": "Invalid"}), 400
+    data = request.json
+    with get_db() as conn:
+        if ref_type == 'fornecedores':
+            cnpj = re.sub(r'[^\d]', '', data.get('key', ''))
+            conn.execute('DELETE FROM fornecedores WHERE cnpj=?', (cnpj,))
+        elif ref_type == 'funcionarios':
+            conn.execute('DELETE FROM funcionarios WHERE nome=?', (data.get('key', ''),))
+        else:
+            conn.execute('DELETE FROM cheques WHERE numero=?', (data.get('key', ''),))
+    return jsonify({"success": True})
+
+@app.route('/data/clear/<ref_type>', methods=['POST'])
+def clear_data(ref_type):
+    """Wipe entire reference table — use with caution."""
+    if ref_type not in ['funcionarios', 'fornecedores', 'cheques']:
+        return jsonify({"error": "Invalid"}), 400
+    with get_db() as conn:
+        conn.execute(f'DELETE FROM {ref_type}')
     return jsonify({"success": True})
 
 @app.route('/config', methods=['GET'])
