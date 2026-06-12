@@ -38,8 +38,18 @@ echo Abrindo instalador do Python...
 start /wait "%TEMP%\python_installer.exe"
 
 :run_part2
+:: Sanity check: don't proceed to Parte 2 if the app code isn't actually present
+if not exist "%~dp0app.py" (
+    echo.
+    echo [ERRO] %~dp0app.py nao encontrado.
+    echo        O codigo do FAM App nao foi obtido corretamente.
+    echo        Execute bootstrap.bat novamente antes de continuar.
+    pause
+    exit /b 1
+)
+
 :: Open Part 2 in a new terminal with updated PATH
 echo.
 echo Abrindo Parte 2...
-start cmd /k "cd /d C:\fam-app && install_part2.bat"
+start cmd /k "cd /d "%~dp0" && install_part2.bat"
 exit

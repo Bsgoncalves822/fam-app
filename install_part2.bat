@@ -7,7 +7,32 @@ echo   ORPROCON / Contadores Digitais
 echo  ================================================================
 echo.
 
-set INSTALL_DIR=C:\fam-app
+:: Derive install dir from this script's own location (no hardcoded path)
+set "INSTALL_DIR=%~dp0"
+if "%INSTALL_DIR:~-1%"=="\" set "INSTALL_DIR=%INSTALL_DIR:~0,-1%"
+
+:: Hard check: app code must be present before continuing
+if not exist "%INSTALL_DIR%\app.py" (
+    echo [ERRO] %INSTALL_DIR%\app.py nao encontrado.
+    echo        A instalacao nao pode continuar. Execute bootstrap.bat
+    echo        para obter o codigo do FAM App corretamente.
+    pause
+    exit /b 1
+)
+if not exist "%INSTALL_DIR%\templates\index.html" (
+    echo [ERRO] %INSTALL_DIR%\templates\index.html nao encontrado.
+    echo        A instalacao nao pode continuar. Execute bootstrap.bat
+    echo        para obter o codigo do FAM App corretamente.
+    pause
+    exit /b 1
+)
+if not exist "%INSTALL_DIR%\launch.vbs" (
+    echo [ERRO] %INSTALL_DIR%\launch.vbs nao encontrado.
+    echo        A instalacao nao pode continuar. Execute bootstrap.bat
+    echo        para obter o codigo do FAM App corretamente.
+    pause
+    exit /b 1
+)
 
 :: Verify this is a git checkout (required for auto-update)
 if not exist "%INSTALL_DIR%\.git" (
@@ -52,8 +77,18 @@ python "%INSTALL_DIR%\generate_data.py"
 
 :: Create desktop shortcut
 echo.
+if not exist "%INSTALL_DIR%\launch.vbs" (
+    echo [ERRO] launch.vbs nao encontrado - atalho nao sera criado.
+    pause
+    exit /b 1
+)
 echo Criando atalho na area de trabalho...
-powershell -command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([System.IO.Path]::Combine([System.Environment]::GetFolderPath('Desktop'), 'FAM App.lnk')); $s.TargetPath = 'wscript.exe'; $s.Arguments = 'C:\fam-app\launch.vbs'; $s.WorkingDirectory = 'C:\fam-app'; $s.WindowStyle = 7; $s.Description = 'FAM Reconciliacao Bancaria'; $s.Save()"
+if exist "%INSTALL_DIR%\fam.ico" (
+    powershell -command "$q=[char]34; $ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([System.IO.Path]::Combine([System.Environment]::GetFolderPath('Desktop'), 'FAM App.lnk')); $s.TargetPath = 'wscript.exe'; $s.Arguments = $q + '%INSTALL_DIR%\launch.vbs' + $q; $s.WorkingDirectory = '%INSTALL_DIR%'; $s.WindowStyle = 7; $s.IconLocation = '%INSTALL_DIR%\fam.ico'; $s.Description = 'FAM Reconciliacao Bancaria'; $s.Save()"
+) else (
+    echo [AVISO] fam.ico nao encontrado - atalho usara icone padrao.
+    powershell -command "$q=[char]34; $ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([System.IO.Path]::Combine([System.Environment]::GetFolderPath('Desktop'), 'FAM App.lnk')); $s.TargetPath = 'wscript.exe'; $s.Arguments = $q + '%INSTALL_DIR%\launch.vbs' + $q; $s.WorkingDirectory = '%INSTALL_DIR%'; $s.WindowStyle = 7; $s.Description = 'FAM Reconciliacao Bancaria'; $s.Save()"
+)
 echo [OK] Atalho "FAM App" criado na area de trabalho
 
 echo.
