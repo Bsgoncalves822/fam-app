@@ -67,6 +67,7 @@
         .ref-count { font-family: 'IBM Plex Mono', monospace; font-size: 0.72rem; color: var(--accent); background: rgba(0,212,255,0.1); padding: 2px 8px; border-radius: 10px; }
         .dropzone-sm { border: 1px dashed var(--border2); border-radius: 7px; padding: 14px 10px; text-align: center; cursor: pointer; transition: all 0.2s; font-size: 0.78rem; color: var(--muted); }
         .dropzone-sm:hover { border-color: var(--accent); color: var(--accent); background: rgba(0,212,255,0.05); }
+        .import-msg { font-size: 0.7rem; color: var(--green); margin-top: 6px; min-height: 14px; text-align: center; font-family: 'IBM Plex Mono', monospace; }
 
         /* HISTORY */
         .history-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
@@ -148,18 +149,28 @@
     <!-- 02: REFERENCE DATA -->
     <div class="card">
         <div class="card-header"><span class="card-num">02</span><span class="card-title">Dados de Referência</span></div>
+        <div style="margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;flex-wrap:wrap;gap:10px;">
+            <div>
+                <div style="font-size:0.88rem;font-weight:600;color:var(--text)">Modelo de Importação</div>
+                <div style="font-size:0.78rem;color:var(--muted);margin-top:2px">Planilha única com abas para Funcionários, Fornecedores e Cheques</div>
+            </div>
+            <a href="/template/download" style="background:var(--accent);color:#000;font-family:'IBM Plex Mono',monospace;font-size:0.78rem;font-weight:700;padding:8px 16px;border-radius:8px;text-decoration:none;text-transform:uppercase;letter-spacing:0.5px;white-space:nowrap;">⬇ Baixar Modelo</a>
+        </div>
         <div class="ref-grid">
             <div class="ref-item">
                 <div class="ref-item-header"><span class="ref-name">Funcionários</span><span class="ref-count" id="count-funcionarios">—</span></div>
-                <div class="dropzone-sm" id="drop-funcionarios"><input type="file" id="file-funcionarios" accept=".csv" hidden>Atualizar CSV</div>
+                <div class="dropzone-sm" id="drop-funcionarios"><input type="file" id="file-funcionarios" accept=".csv,.xlsx,.xls" hidden>Atualizar CSV/XLSX</div>
+                <div class="import-msg" id="msg-funcionarios"></div>
             </div>
             <div class="ref-item">
                 <div class="ref-item-header"><span class="ref-name">Fornecedores</span><span class="ref-count" id="count-fornecedores">—</span></div>
-                <div class="dropzone-sm" id="drop-fornecedores"><input type="file" id="file-fornecedores" accept=".csv" hidden>Atualizar CSV</div>
+                <div class="dropzone-sm" id="drop-fornecedores"><input type="file" id="file-fornecedores" accept=".csv,.xlsx,.xls" hidden>Atualizar CSV/XLSX</div>
+                <div class="import-msg" id="msg-fornecedores"></div>
             </div>
             <div class="ref-item">
                 <div class="ref-item-header"><span class="ref-name">Cheques</span><span class="ref-count" id="count-cheques">—</span></div>
-                <div class="dropzone-sm" id="drop-cheques"><input type="file" id="file-cheques" accept=".csv" hidden>Atualizar CSV</div>
+                <div class="dropzone-sm" id="drop-cheques"><input type="file" id="file-cheques" accept=".csv,.xlsx,.xls" hidden>Atualizar CSV/XLSX</div>
+                <div class="import-msg" id="msg-cheques"></div>
             </div>
         </div>
     </div>
@@ -288,7 +299,17 @@ function downloadFile() { window.location.href = `/download/${currentTaskId}`; }
 
 // Reference data
 ['funcionarios', 'fornecedores', 'cheques'].forEach(type => {
-    setupDrop(`drop-${type}`, `file-${type}`, `/data/${type}`, () => loadRefData());
+    setupDrop(`drop-${type}`, `file-${type}`, `/data/${type}`, (data) => {
+        loadRefData();
+        if (data.imported) {
+            const parts = Object.entries(data.imported).map(([k, v]) => `${k}: +${v}`).join(' · ');
+            const msgEl = document.getElementById(`msg-${type}`);
+            if (msgEl) {
+                msgEl.textContent = parts;
+                setTimeout(() => { msgEl.textContent = ''; }, 5000);
+            }
+        }
+    });
 });
 
 async function loadRefData() {

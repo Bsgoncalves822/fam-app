@@ -740,34 +740,145 @@ def get_data(ref_type):
             rows = conn.execute('SELECT numero as Numero, portador as Portador FROM cheques').fetchall()
     return jsonify([dict(r) for r in rows])
 
+SHEET_ALIASES = {
+    'funcionarios': ['funcionarios', 'funcionário', 'funcionários'],
+    'fornecedores': ['fornecedores', 'fornecedor'],
+    'cheques': ['cheques', 'cheque'],
+}
+
+def import_funcionarios_df(df, conn):
+    df = df.rename(columns={c: str(c).strip().upper() for c in df.columns})
+    count = 0
+    for _, row in df.iterrows():
+        nome = str(row.get('NOME', '')).strip()
+        if nome and nome.lower() != 'nan':
+            conn.execute('INSERT OR IGNORE INTO funcionarios (nome) VALUES (?)', (nome,))
+            count += 1
+    return count
+
+def import_fornecedores_df(df, conn):
+    df = df.rename(columns={c: str(c).strip().upper() for c in df.columns})
+    count = 0
+    for _, row in df.iterrows():
+        cnpj = re.sub(r'[^\d]', '', str(row.get('CNPJ', '')))
+        nome = str(row.get('NOME', '')).strip()
+        if cnpj and nome and nome.lower() != 'nan':
+            conn.execute('INSERT OR REPLACE INTO fornecedores (cnpj, nome, source, confirmed) VALUES (?,?,?,1)', (cnpj, nome, 'CADASTRO'))
+            count += 1
+    return count
+
+def import_cheques_df(df, conn):
+    df = df.rename(columns={c: str(c).strip().upper() for c in df.columns})
+    count = 0
+    for _, row in df.iterrows():
+        num = str(row.get('NUMERO', '')).strip()
+        por = str(row.get('PORTADOR', '')).strip()
+        if num and por and num.lower() != 'nan' and por.lower() != 'nan':
+            conn.execute('INSERT OR REPLACE INTO cheques (numero, portador) VALUES (?,?)', (num, por))
+            count += 1
+    return count
+
+IMPORTERS = {
+    'funcionarios': import_funcionarios_df,
+    'fornecedores': import_fornecedores_df,
+    'cheques': import_cheques_df,
+}
+
 @app.route('/data/<ref_type>', methods=['POST'])
 def update_data(ref_type):
     if ref_type not in ['funcionarios', 'fornecedores', 'cheques']:
         return jsonify({"error": "Invalid"}), 400
     if 'file' not in request.files: return jsonify({"error": "No file"}), 400
     f = request.files['file']
-    path = os.path.join(app.config['DATA_FOLDER'], f"{ref_type}_upload.csv")
+    filename = f.filename or ''
+    ext = os.path.splitext(filename)[1].lower()
+    path = os.path.join(app.config['DATA_FOLDER'], f"{ref_type}_upload{ext or '.csv'}")
     f.save(path)
-    df = pd.read_csv(path, dtype=str).fillna('')
-    with get_db() as conn:
-        if ref_type == 'fornecedores':
-            for _, row in df.iterrows():
-                cnpj = re.sub(r'[^\d]', '', row.get('CNPJ', ''))
-                nome = row.get('NOME', '').strip()
-                if cnpj and nome:
-                    conn.execute('INSERT OR REPLACE INTO fornecedores (cnpj, nome, source, confirmed) VALUES (?,?,?,1)', (cnpj, nome, 'CADASTRO'))
-        elif ref_type == 'funcionarios':
-            for _, row in df.iterrows():
-                nome = row.get('NOME', '').strip()
-                if nome:
-                    conn.execute('INSERT OR IGNORE INTO funcionarios (nome) VALUES (?)', (nome,))
-        else:
-            for _, row in df.iterrows():
-                num = row.get('Numero', '').strip()
-                por = row.get('Portador', '').strip()
-                if num and por:
-                    conn.execute('INSERT OR REPLACE INTO cheques (numero, portador) VALUES (?,?)', (num, por))
-    return jsonify({"success": True})
+
+    counts = {}
+
+    if ext in ('.xlsx', '.xls'):
+        xls = pd.ExcelFile(path)
+        sheet_map = {s.strip().lower(): s for s in xls.sheet_names}
+
+        with get_db() as conn:
+            for rtype, aliases in SHEET_ALIASES.items():
+                match = next((sheet_map[a] for a in aliases if a in sheet_map), None)
+                if match:
+                    df = pd.read_excel(path, sheet_name=match, dtype=str).fillna('')
+                    counts[rtype] = IMPORTERS[rtype](df, conn)
+
+        if not counts:
+            return jsonify({"error": "Nenhuma aba reconhecida (Funcionarios/Fornecedores/Cheques)"}), 400
+
+    else:
+        df = pd.read_csv(path, dtype=str).fillna('')
+        with get_db() as conn:
+            counts[ref_type] = IMPORTERS[ref_type](df, conn)
+
+    return jsonify({"success": True, "imported": counts})
+
+@app.route('/template/download')
+def download_template():
+    out_path = os.path.join(app.config['OUTPUT_FOLDER'], 'FAM_Modelo_Importacao.xlsx')
+    wb = Workbook()
+
+    header_fill = PatternFill(start_color="0D0F12", end_color="0D0F12", fill_type="solid")
+    header_font = Font(bold=True, color="00D4FF", size=10)
+    header_align = Alignment(horizontal='center', vertical='center')
+
+    def style_header(ws, headers, widths):
+        for i, (h, w) in enumerate(zip(headers, widths), 1):
+            cell = ws.cell(row=1, column=i, value=h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+            ws.column_dimensions[get_column_letter(i)].width = w
+        ws.row_dimensions[1].height = 22
+        ws.freeze_panes = 'A2'
+
+    ws1 = wb.active
+    ws1.title = "Funcionarios"
+    style_header(ws1, ['NOME'], [40])
+    ws1.append(['JOAO DA SILVA SANTOS'])
+
+    ws2 = wb.create_sheet("Fornecedores")
+    style_header(ws2, ['CNPJ', 'NOME'], [22, 45])
+    ws2.append(['12345678000199', 'EMPRESA EXEMPLO LTDA'])
+
+    ws3 = wb.create_sheet("Cheques")
+    style_header(ws3, ['Numero', 'Portador'], [15, 40])
+    ws3.append(['1234', 'FORNECEDOR EXEMPLO'])
+
+    ws4 = wb.create_sheet("Instrucoes")
+    ws4.column_dimensions['A'].width = 90
+    instructions = [
+        "INSTRUCOES DE USO — MODELO DE IMPORTACAO FAM",
+        "",
+        "Este arquivo possui 3 abas de dados: Funcionarios, Fornecedores, Cheques.",
+        "",
+        "Voce pode preencher quantas abas quiser neste mesmo arquivo.",
+        "Ao subir o arquivo em qualquer um dos 3 campos de upload (Funcionarios,",
+        "Fornecedores ou Cheques), o sistema vai ler TODAS as abas presentes",
+        "e atualizar cada categoria correspondente automaticamente.",
+        "",
+        "Tambem e possivel enviar apenas um CSV simples de uma categoria,",
+        "no formato das colunas mostradas na aba correspondente.",
+        "",
+        "FUNCIONARIOS: coluna NOME (nome completo do colaborador)",
+        "FORNECEDORES: colunas CNPJ (somente numeros, 14 digitos) e NOME",
+        "CHEQUES: colunas Numero (numero do cheque) e Portador (nome do beneficiario)",
+        "",
+        "Nao altere os nomes dos cabecalhos (primeira linha) das abas.",
+        "Linhas de exemplo podem ser apagadas ou sobrescritas.",
+    ]
+    for i, line in enumerate(instructions, 1):
+        cell = ws4.cell(row=i, column=1, value=line)
+        if i == 1:
+            cell.font = Font(bold=True, color="00D4FF", size=12)
+
+    wb.save(out_path)
+    return send_file(out_path, as_attachment=True, download_name='FAM_Modelo_Importacao.xlsx')
 
 @app.route('/data/<ref_type>/delete', methods=['POST'])
 def delete_data(ref_type):
