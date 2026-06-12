@@ -984,6 +984,13 @@ def check_for_updates():
         return False
 
     local_sha = get_local_commit_sha()
+    if local_sha is None:
+        # First time auto-update runs: establish baseline without re-downloading,
+        # assuming the currently running code already matches this commit.
+        save_local_commit_sha(remote_sha)
+        logger.info(f"Auto-update: baseline set to {remote_sha[:7]}.")
+        return False
+
     if local_sha == remote_sha:
         logger.info("Auto-update: already up to date.")
         return False
