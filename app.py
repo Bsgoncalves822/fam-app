@@ -956,22 +956,26 @@ def confirm_fornecedores():
             conn.execute('UPDATE fornecedores SET confirmed=1 WHERE cnpj=?', (cnpj,))
     return jsonify({"success": True, "confirmed": len(cnpjs)})
 
-def check_for_updates():
-    """Update the local checkout via `git pull`. Requires the app directory
-    to be a git clone of the configured repo (set up by the installer)."""
-    cfg = load_config()
-    if not cfg.get('auto_update_enabled'):
+def _git_available():
+    try:
+        subprocess.run(['git', '--version'], capture_output=True, timeout=5)
+        return True
+    except Exception:
         return False
 
+def _clear_pycache():
+    for root, dirs, files in os.walk(BASE_DIR):
+        if '__pycache__' in dirs:
+            shutil.rmtree(os.path.join(root, '__pycache__'), ignore_errors=True)
+
+def _update_via_git(branch):
+    """Update the local checkout via `git fetch` + `git reset --hard`.
+    Requires the app directory to be a git clone of the repo."""
     git_dir = os.path.join(BASE_DIR, '.git')
     if not os.path.isdir(git_dir):
-        logger.warning("Auto-update: not a git repository. Run the installer to enable auto-update.")
-        return False
-
-    branch = cfg.get('github_branch', 'main')
+        return None  # not a git checkout -> let caller fall back
 
     try:
-        # Make sure we know the latest remote state
         subprocess.run(['git', 'fetch', 'origin', branch], cwd=BASE_DIR,
                         capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30, check=True)
 
@@ -980,14 +984,14 @@ def check_for_updates():
         remote_sha = subprocess.run(['git', 'rev-parse', f'origin/{branch}'], cwd=BASE_DIR,
                                      capture_output=True, text=True, encoding='utf-8', errors='replace', check=True).stdout.strip()
     except Exception as e:
-        logger.warning(f"Auto-update: could not reach GitHub ({e}). Skipping update check.")
+        logger.warning(f"Auto-update (git): could not reach GitHub ({e}). Skipping.")
         return False
 
     if local_sha == remote_sha:
-        logger.info("Auto-update: already up to date.")
+        logger.info("Auto-update (git): already up to date.")
         return False
 
-    logger.info(f"Auto-update: new commit found ({remote_sha[:7]}). Updating...")
+    logger.info(f"Auto-update (git): new commit found ({remote_sha[:7]}). Updating...")
     try:
         # Stash any local edits (there shouldn't be any tracked-file edits,
         # but this protects against a dirty working tree blocking the pull)
@@ -997,16 +1001,108 @@ def check_for_updates():
         subprocess.run(['git', 'reset', '--hard', f'origin/{branch}'], cwd=BASE_DIR,
                         capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30, check=True)
 
-        # Drop stale bytecode so Python doesn't run old .pyc against new .py
-        for root, dirs, files in os.walk(BASE_DIR):
-            if '__pycache__' in dirs:
-                shutil.rmtree(os.path.join(root, '__pycache__'), ignore_errors=True)
-
-        logger.info(f"Auto-update: complete. Now at commit {remote_sha[:7]}. Restarting...")
+        _clear_pycache()
+        logger.info(f"Auto-update (git): complete. Now at commit {remote_sha[:7]}. Restarting...")
         return True
     except Exception as e:
-        logger.error(f"Auto-update failed: {e}.")
+        logger.error(f"Auto-update (git) failed: {e}.")
         return False
+
+# Fallback file list — used ONLY when git is unavailable on the machine.
+# Keep in sync with files that matter for the app to run correctly.
+URL_FALLBACK_FILES = [
+    'app.py',
+    'requirements.txt',
+    'launch.vbs',
+    'generate_data.py',
+    'static/style.css',
+    'static/app.js',
+    'templates/index.html',
+]
+URL_FALLBACK_REPO   = 'Bsgoncalves822/fam-app'
+URL_FALLBACK_HASHES = os.path.join(BASE_DIR, 'data', 'update_hashes.json')
+
+def _load_hashes():
+    if os.path.exists(URL_FALLBACK_HASHES):
+        try:
+            with open(URL_FALLBACK_HASHES, encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def _save_hashes(hashes):
+    with open(URL_FALLBACK_HASHES, 'w', encoding='utf-8') as f:
+        json.dump(hashes, f, indent=2)
+
+def _update_via_url(branch):
+    """Fallback updater for machines without git: fetches each tracked file
+    from raw.githubusercontent.com (cache-busted), compares MD5, overwrites
+    if changed."""
+    import hashlib
+    repo = URL_FALLBACK_REPO
+    old_hashes = _load_hashes()
+    new_hashes = dict(old_hashes)
+    changed = []
+
+    for relpath in URL_FALLBACK_FILES:
+        url = f"https://raw.githubusercontent.com/{repo}/{branch}/{relpath}?v={int(time.time())}"
+        try:
+            r = requests.get(url, timeout=15)
+            if r.status_code != 200:
+                logger.warning(f"Auto-update (url): could not fetch {relpath} (HTTP {r.status_code}). Skipping.")
+                continue
+            content = r.content
+        except Exception as e:
+            logger.warning(f"Auto-update (url): could not fetch {relpath} ({e}). Skipping.")
+            continue
+
+        digest = hashlib.md5(content).hexdigest()
+        if old_hashes.get(relpath) == digest:
+            continue  # unchanged since last check
+
+        local_path = os.path.join(BASE_DIR, relpath)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+        # Compare against what's actually on disk too, in case hashes.json is stale
+        if os.path.exists(local_path):
+            with open(local_path, 'rb') as f:
+                if hashlib.md5(f.read()).hexdigest() == digest:
+                    new_hashes[relpath] = digest
+                    continue
+
+        with open(local_path, 'wb') as f:
+            f.write(content)
+        new_hashes[relpath] = digest
+        changed.append(relpath)
+        logger.info(f"Auto-update (url): updated {relpath}")
+
+    _save_hashes(new_hashes)
+
+    if changed:
+        _clear_pycache()
+        logger.info(f"Auto-update (url): {len(changed)} file(s) updated. Restarting...")
+        return True
+
+    logger.info("Auto-update (url): already up to date.")
+    return False
+
+def check_for_updates():
+    cfg = load_config()
+    if not cfg.get('auto_update_enabled'):
+        return False
+
+    branch = cfg.get('github_branch', 'main')
+
+    if _git_available():
+        result = _update_via_git(branch)
+        if result is not None:
+            return result
+        logger.info("Auto-update: not a git checkout, falling back to direct file download.")
+    else:
+        logger.info("Auto-update: git not available, using direct file download.")
+
+    return _update_via_url(branch)
 
 if __name__ == '__main__':
     logger.info(f"Encoding: stdout={sys.stdout.encoding}, filesystem={sys.getfilesystemencoding()}, locale_default={sys.getdefaultencoding()}")

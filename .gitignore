@@ -5,6 +5,7 @@ logs/
 data/fam.db
 data/*.csv
 data/last_commit.txt
+data/update_hashes.json
 
 # Config (company-specific)
 config.json
