@@ -1,4 +1,4 @@
-import os, re, uuid, threading, zipfile, io, time, requests, logging, json, sqlite3
+import os, re, sys, uuid, threading, zipfile, io, time, requests, logging, json, sqlite3, subprocess, shutil
 import pandas as pd
 import pdfplumber
 from datetime import timedelta, datetime
@@ -10,6 +10,13 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Force UTF-8 for stdout/stderr so logging with PT-BR accents (ã, ç, é...)
+# doesn't crash on Windows consoles using cp1252.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 def load_config():
     path = os.path.join(BASE_DIR, 'config.json')
     defaults = {
@@ -19,17 +26,19 @@ def load_config():
         "port": 5002,
         "comprovante_tolerance_days": 1,
         "receita_ws_enabled": True,
-        "receita_ws_rpm": 3
+        "receita_ws_rpm": 3,
+        "auto_update_enabled": False,
+        "github_branch": "main"
     }
     if os.path.exists(path):
-        with open(path) as f:
+        with open(path, encoding='utf-8') as f:
             data = json.load(f)
         defaults.update(data)
     return defaults
 
 def save_config(cfg):
-    with open(os.path.join(BASE_DIR, 'config.json'), 'w') as f:
-        json.dump(cfg, f, indent=4)
+    with open(os.path.join(BASE_DIR, 'config.json'), 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=4, ensure_ascii=False)
 
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -111,7 +120,7 @@ def migrate_csvs_to_db():
         forn_count = conn.execute('SELECT COUNT(*) FROM fornecedores').fetchone()[0]
         forn_path = os.path.join(data_dir, 'fornecedores.csv')
         if forn_count == 0 and os.path.exists(forn_path):
-            df = pd.read_csv(forn_path, dtype=str).fillna('')
+            df = read_csv_any_encoding(forn_path, dtype=str).fillna('')
             count = 0
             for _, row in df.iterrows():
                 cnpj = re.sub(r'[^\d]', '', row.get('CNPJ', ''))
@@ -124,7 +133,7 @@ def migrate_csvs_to_db():
         func_count = conn.execute('SELECT COUNT(*) FROM funcionarios').fetchone()[0]
         func_path = os.path.join(data_dir, 'funcionarios.csv')
         if func_count == 0 and os.path.exists(func_path):
-            df = pd.read_csv(func_path, dtype=str).fillna('')
+            df = read_csv_any_encoding(func_path, dtype=str).fillna('')
             count = 0
             for _, row in df.iterrows():
                 nome = row.get('NOME', '').strip()
@@ -136,7 +145,7 @@ def migrate_csvs_to_db():
         cheq_count = conn.execute('SELECT COUNT(*) FROM cheques').fetchone()[0]
         cheq_path = os.path.join(data_dir, 'cheques.csv')
         if cheq_count == 0 and os.path.exists(cheq_path):
-            df = pd.read_csv(cheq_path, dtype=str).fillna('')
+            df = read_csv_any_encoding(cheq_path, dtype=str).fillna('')
             count = 0
             for _, row in df.iterrows():
                 num = row.get('Numero', '').strip()
@@ -165,6 +174,18 @@ CPF_RE  = re.compile(r'\b\d{3}[\.\-]?\d{3}[\.\-]?\d{3}[\-]?\d{2}\b')
 FAM_OWN_CNPJ = '04957294000103'   # FAM Metal's own CNPJ — self-transfers
 
 def clean_cnpj(raw): return re.sub(r'[^\d]', '', raw)
+
+def read_csv_any_encoding(path, **kwargs):
+    """Read a CSV trying UTF-8 first, falling back to latin-1/cp1252.
+    Handles CSVs exported from pt-BR Windows tools (Excel, SCI) which
+    are often latin-1/cp1252 instead of UTF-8."""
+    for enc in ('utf-8-sig', 'utf-8', 'cp1252', 'latin-1'):
+        try:
+            return pd.read_csv(path, encoding=enc, **kwargs)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    # last resort: let pandas raise with its default error
+    return pd.read_csv(path, **kwargs)
 
 def extract_cnpj(text):
     text = str(text)
@@ -366,12 +387,17 @@ def lookup_comprovante(date_obj, valor, lookup):
     results.sort(key=lambda x: abs(x['delta']))
     return results[0]
 
-def extract_cnpj_from_pdf(filename, zip_path):
+def extract_cnpj_from_pdf(filename, open_zf):
+    """Extract recipient CNPJ from comprovante PDF using an already-open ZipFile handle."""
     try:
-        with zipfile.ZipFile(zip_path, 'r') as zf: data = zf.read(filename)
+        data = open_zf.read(filename)
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             text = '\n'.join(p.extract_text() or '' for p in pdf.pages[:2])
-        return extract_cnpj(text)
+        for m in CNPJ_RE.finditer(text):
+            cnpj = clean_cnpj(m.group())
+            if len(cnpj) == 14 and cnpj != FAM_OWN_CNPJ:
+                return cnpj
+        return None
     except: return None
 
 def batch_lookup_cnpjs(unknown_cnpjs, task_id, cnpj_cache):
@@ -523,8 +549,10 @@ def run_fam_etl(task_id, sci_path, zip_path):
         CODE_NAO   = cfg['codigo_nao_identificado']
 
         stat_counts = {'self': 0, 'cadastro': 0, 'receita': 0, 'comp_name': 0, 'folha': 0, 'cheque': 0, 'pdf': 0, 'nao': 0}
+        total_rows = len(df)
 
-        for idx, row in df.iterrows():
+        with zipfile.ZipFile(zip_path, 'r') as open_zf:
+         for idx, row in df.iterrows():
             comp_text = str(row.get('Complemento', ''))
             hist_text = str(row.get('Historico', ''))
             res = {
@@ -613,7 +641,7 @@ def run_fam_etl(task_id, sci_path, zip_path):
             if comp_match:
                 res['COMPROVANTE'] = comp_match['filename']
                 if not res['PARTICIPANTE'] or res['PARTICIPANTE'].startswith('(?)'):
-                    pdf_cnpj = extract_cnpj_from_pdf(comp_match['filename'], zip_path)
+                    pdf_cnpj = extract_cnpj_from_pdf(comp_match['filename'], open_zf)
                     if pdf_cnpj and pdf_cnpj in forn_map:
                         res['PARTICIPANTE']      = forn_map[pdf_cnpj]
                         res['CNPJ_IDENTIFICADO'] = pdf_cnpj
@@ -638,7 +666,11 @@ def run_fam_etl(task_id, sci_path, zip_path):
                 stat_counts['nao'] += 1
 
             results.append(res)
+            if (idx + 1) % 1000 == 0:
+                pct = (idx + 1) / total_rows * 100
+                tasks[task_id]['log'][-1] = f"Enriquecendo transacoes... {idx+1}/{total_rows} ({pct:.0f}%)"
 
+        # end of open_zf context
         if new_fornecedores:
             with get_db() as conn:
                 for cnpj, nome in new_fornecedores.items():
@@ -656,8 +688,8 @@ def run_fam_etl(task_id, sci_path, zip_path):
         total  = len(results)
 
         with get_db() as conn:
-            conn.execute('INSERT INTO run_history (total_rows,ok_count,revisar_count,nao_encontrado_count,novos_fornecedores) VALUES (?,?,?,?,?)',
-                        (total, ok_c, rev_c, nao_c, len(new_fornecedores)))
+            conn.execute('INSERT INTO run_history (run_date,total_rows,ok_count,revisar_count,nao_encontrado_count,novos_fornecedores) VALUES (?,?,?,?,?,?)',
+                        (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), total, ok_c, rev_c, nao_c, len(new_fornecedores)))
 
         tasks[task_id]['status'] = 'DONE'
         tasks[task_id]['file']   = out_path
@@ -729,33 +761,168 @@ def get_data(ref_type):
             rows = conn.execute('SELECT numero as Numero, portador as Portador FROM cheques').fetchall()
     return jsonify([dict(r) for r in rows])
 
+SHEET_ALIASES = {
+    'funcionarios': ['funcionarios', 'funcionário', 'funcionários'],
+    'fornecedores': ['fornecedores', 'fornecedor'],
+    'cheques': ['cheques', 'cheque'],
+}
+
+def import_funcionarios_df(df, conn):
+    df = df.rename(columns={c: str(c).strip().upper() for c in df.columns})
+    count = 0
+    for _, row in df.iterrows():
+        nome = str(row.get('NOME', '')).strip()
+        if nome and nome.lower() != 'nan':
+            conn.execute('INSERT OR IGNORE INTO funcionarios (nome) VALUES (?)', (nome,))
+            count += 1
+    return count
+
+def import_fornecedores_df(df, conn):
+    df = df.rename(columns={c: str(c).strip().upper() for c in df.columns})
+    count = 0
+    for _, row in df.iterrows():
+        cnpj = re.sub(r'[^\d]', '', str(row.get('CNPJ', '')))
+        nome = str(row.get('NOME', '')).strip()
+        if cnpj and nome and nome.lower() != 'nan':
+            conn.execute('INSERT OR REPLACE INTO fornecedores (cnpj, nome, source, confirmed) VALUES (?,?,?,1)', (cnpj, nome, 'CADASTRO'))
+            count += 1
+    return count
+
+def import_cheques_df(df, conn):
+    df = df.rename(columns={c: str(c).strip().upper() for c in df.columns})
+    count = 0
+    for _, row in df.iterrows():
+        num = str(row.get('NUMERO', '')).strip()
+        por = str(row.get('PORTADOR', '')).strip()
+        if num and por and num.lower() != 'nan' and por.lower() != 'nan':
+            conn.execute('INSERT OR REPLACE INTO cheques (numero, portador) VALUES (?,?)', (num, por))
+            count += 1
+    return count
+
+IMPORTERS = {
+    'funcionarios': import_funcionarios_df,
+    'fornecedores': import_fornecedores_df,
+    'cheques': import_cheques_df,
+}
+
 @app.route('/data/<ref_type>', methods=['POST'])
 def update_data(ref_type):
     if ref_type not in ['funcionarios', 'fornecedores', 'cheques']:
         return jsonify({"error": "Invalid"}), 400
     if 'file' not in request.files: return jsonify({"error": "No file"}), 400
     f = request.files['file']
-    path = os.path.join(app.config['DATA_FOLDER'], f"{ref_type}_upload.csv")
+    filename = f.filename or ''
+    ext = os.path.splitext(filename)[1].lower()
+    path = os.path.join(app.config['DATA_FOLDER'], f"{ref_type}_upload{ext or '.csv'}")
     f.save(path)
-    df = pd.read_csv(path, dtype=str).fillna('')
+
+    counts = {}
+
+    if ext in ('.xlsx', '.xls'):
+        xls = pd.ExcelFile(path)
+        sheet_map = {s.strip().lower(): s for s in xls.sheet_names}
+
+        with get_db() as conn:
+            for rtype, aliases in SHEET_ALIASES.items():
+                match = next((sheet_map[a] for a in aliases if a in sheet_map), None)
+                if match:
+                    df = pd.read_excel(path, sheet_name=match, dtype=str).fillna('')
+                    counts[rtype] = IMPORTERS[rtype](df, conn)
+
+        if not counts:
+            return jsonify({"error": "Nenhuma aba reconhecida (Funcionarios/Fornecedores/Cheques)"}), 400
+
+    else:
+        df = read_csv_any_encoding(path, dtype=str).fillna('')
+        with get_db() as conn:
+            counts[ref_type] = IMPORTERS[ref_type](df, conn)
+
+    return jsonify({"success": True, "imported": counts})
+
+@app.route('/template/download')
+def download_template():
+    out_path = os.path.join(app.config['OUTPUT_FOLDER'], 'FAM_Modelo_Importacao.xlsx')
+    wb = Workbook()
+
+    header_fill = PatternFill(start_color="0D0F12", end_color="0D0F12", fill_type="solid")
+    header_font = Font(bold=True, color="00D4FF", size=10)
+    header_align = Alignment(horizontal='center', vertical='center')
+
+    def style_header(ws, headers, widths):
+        for i, (h, w) in enumerate(zip(headers, widths), 1):
+            cell = ws.cell(row=1, column=i, value=h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+            ws.column_dimensions[get_column_letter(i)].width = w
+        ws.row_dimensions[1].height = 22
+        ws.freeze_panes = 'A2'
+
+    ws1 = wb.active
+    ws1.title = "Funcionarios"
+    style_header(ws1, ['NOME'], [40])
+    ws1.append(['JOAO DA SILVA SANTOS'])
+
+    ws2 = wb.create_sheet("Fornecedores")
+    style_header(ws2, ['CNPJ', 'NOME'], [22, 45])
+    ws2.append(['12345678000199', 'EMPRESA EXEMPLO LTDA'])
+
+    ws3 = wb.create_sheet("Cheques")
+    style_header(ws3, ['Numero', 'Portador'], [15, 40])
+    ws3.append(['1234', 'FORNECEDOR EXEMPLO'])
+
+    ws4 = wb.create_sheet("Instrucoes")
+    ws4.column_dimensions['A'].width = 90
+    instructions = [
+        "INSTRUCOES DE USO — MODELO DE IMPORTACAO FAM",
+        "",
+        "Este arquivo possui 3 abas de dados: Funcionarios, Fornecedores, Cheques.",
+        "",
+        "Voce pode preencher quantas abas quiser neste mesmo arquivo.",
+        "Ao subir o arquivo em qualquer um dos 3 campos de upload (Funcionarios,",
+        "Fornecedores ou Cheques), o sistema vai ler TODAS as abas presentes",
+        "e atualizar cada categoria correspondente automaticamente.",
+        "",
+        "Tambem e possivel enviar apenas um CSV simples de uma categoria,",
+        "no formato das colunas mostradas na aba correspondente.",
+        "",
+        "FUNCIONARIOS: coluna NOME (nome completo do colaborador)",
+        "FORNECEDORES: colunas CNPJ (somente numeros, 14 digitos) e NOME",
+        "CHEQUES: colunas Numero (numero do cheque) e Portador (nome do beneficiario)",
+        "",
+        "Nao altere os nomes dos cabecalhos (primeira linha) das abas.",
+        "Linhas de exemplo podem ser apagadas ou sobrescritas.",
+    ]
+    for i, line in enumerate(instructions, 1):
+        cell = ws4.cell(row=i, column=1, value=line)
+        if i == 1:
+            cell.font = Font(bold=True, color="00D4FF", size=12)
+
+    wb.save(out_path)
+    return send_file(out_path, as_attachment=True, download_name='FAM_Modelo_Importacao.xlsx')
+
+@app.route('/data/<ref_type>/delete', methods=['POST'])
+def delete_data(ref_type):
+    if ref_type not in ['funcionarios', 'fornecedores', 'cheques']:
+        return jsonify({"error": "Invalid"}), 400
+    data = request.json
     with get_db() as conn:
         if ref_type == 'fornecedores':
-            for _, row in df.iterrows():
-                cnpj = re.sub(r'[^\d]', '', row.get('CNPJ', ''))
-                nome = row.get('NOME', '').strip()
-                if cnpj and nome:
-                    conn.execute('INSERT OR REPLACE INTO fornecedores (cnpj, nome, source, confirmed) VALUES (?,?,?,1)', (cnpj, nome, 'CADASTRO'))
+            cnpj = re.sub(r'[^\d]', '', data.get('key', ''))
+            conn.execute('DELETE FROM fornecedores WHERE cnpj=?', (cnpj,))
         elif ref_type == 'funcionarios':
-            for _, row in df.iterrows():
-                nome = row.get('NOME', '').strip()
-                if nome:
-                    conn.execute('INSERT OR IGNORE INTO funcionarios (nome) VALUES (?)', (nome,))
+            conn.execute('DELETE FROM funcionarios WHERE nome=?', (data.get('key', ''),))
         else:
-            for _, row in df.iterrows():
-                num = row.get('Numero', '').strip()
-                por = row.get('Portador', '').strip()
-                if num and por:
-                    conn.execute('INSERT OR REPLACE INTO cheques (numero, portador) VALUES (?,?)', (num, por))
+            conn.execute('DELETE FROM cheques WHERE numero=?', (data.get('key', ''),))
+    return jsonify({"success": True})
+
+@app.route('/data/clear/<ref_type>', methods=['POST'])
+def clear_data(ref_type):
+    """Wipe entire reference table — use with caution."""
+    if ref_type not in ['funcionarios', 'fornecedores', 'cheques']:
+        return jsonify({"error": "Invalid"}), 400
+    with get_db() as conn:
+        conn.execute(f'DELETE FROM {ref_type}')
     return jsonify({"success": True})
 
 @app.route('/config', methods=['GET'])
@@ -767,7 +934,8 @@ def update_config():
     data = request.json
     cfg  = load_config()
     for k in ['codigo_fornecedor','codigo_folha','codigo_nao_identificado',
-              'comprovante_tolerance_days','receita_ws_enabled','receita_ws_rpm']:
+              'comprovante_tolerance_days','receita_ws_enabled','receita_ws_rpm',
+              'auto_update_enabled','github_branch']:
         if k in data:
             cfg[k] = data[k]
     save_config(cfg)
@@ -788,9 +956,67 @@ def confirm_fornecedores():
             conn.execute('UPDATE fornecedores SET confirmed=1 WHERE cnpj=?', (cnpj,))
     return jsonify({"success": True, "confirmed": len(cnpjs)})
 
+def check_for_updates():
+    """Update the local checkout via `git pull`. Requires the app directory
+    to be a git clone of the configured repo (set up by the installer)."""
+    cfg = load_config()
+    if not cfg.get('auto_update_enabled'):
+        return False
+
+    git_dir = os.path.join(BASE_DIR, '.git')
+    if not os.path.isdir(git_dir):
+        logger.warning("Auto-update: not a git repository. Run the installer to enable auto-update.")
+        return False
+
+    branch = cfg.get('github_branch', 'main')
+
+    try:
+        # Make sure we know the latest remote state
+        subprocess.run(['git', 'fetch', 'origin', branch], cwd=BASE_DIR,
+                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30, check=True)
+
+        local_sha  = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=BASE_DIR,
+                                     capture_output=True, text=True, encoding='utf-8', errors='replace', check=True).stdout.strip()
+        remote_sha = subprocess.run(['git', 'rev-parse', f'origin/{branch}'], cwd=BASE_DIR,
+                                     capture_output=True, text=True, encoding='utf-8', errors='replace', check=True).stdout.strip()
+    except Exception as e:
+        logger.warning(f"Auto-update: could not reach GitHub ({e}). Skipping update check.")
+        return False
+
+    if local_sha == remote_sha:
+        logger.info("Auto-update: already up to date.")
+        return False
+
+    logger.info(f"Auto-update: new commit found ({remote_sha[:7]}). Updating...")
+    try:
+        # Stash any local edits (there shouldn't be any tracked-file edits,
+        # but this protects against a dirty working tree blocking the pull)
+        subprocess.run(['git', 'stash', '--include-untracked'], cwd=BASE_DIR,
+                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
+
+        subprocess.run(['git', 'reset', '--hard', f'origin/{branch}'], cwd=BASE_DIR,
+                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30, check=True)
+
+        # Drop stale bytecode so Python doesn't run old .pyc against new .py
+        for root, dirs, files in os.walk(BASE_DIR):
+            if '__pycache__' in dirs:
+                shutil.rmtree(os.path.join(root, '__pycache__'), ignore_errors=True)
+
+        logger.info(f"Auto-update: complete. Now at commit {remote_sha[:7]}. Restarting...")
+        return True
+    except Exception as e:
+        logger.error(f"Auto-update failed: {e}.")
+        return False
+
 if __name__ == '__main__':
+    logger.info(f"Encoding: stdout={sys.stdout.encoding}, filesystem={sys.getfilesystemencoding()}, locale_default={sys.getdefaultencoding()}")
     init_db()
     migrate_csvs_to_db()
+
+    if check_for_updates():
+        python = sys.executable
+        os.execv(python, [python] + sys.argv)
+
     cfg = load_config()
     logger.info(f"FAM App starting on port {cfg['port']}")
     app.run(host='0.0.0.0', port=cfg['port'], debug=False)
