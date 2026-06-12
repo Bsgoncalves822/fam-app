@@ -236,7 +236,7 @@
         <div class="toggle-row" style="margin-top:16px">
             <div>
                 <div class="toggle-label">Atualização Automática</div>
-                <div class="toggle-sub">Verifica e aplica updates do GitHub ao iniciar</div>
+                <div class="toggle-sub">Executa "git pull" do repositório ao iniciar</div>
             </div>
             <label class="toggle">
                 <input type="checkbox" id="cfg-autoupdate">
@@ -245,18 +245,8 @@
         </div>
 
         <div class="form-group" style="margin-top:16px">
-            <label class="form-label">GitHub Repo</label>
-            <input class="form-input" id="cfg-gh-repo" placeholder="Bsgoncalves822/fam-app">
-        </div>
-        <div class="form-row" style="margin-top:14px">
-            <div>
-                <label class="form-label" style="font-size:0.65rem">Branch</label>
-                <input class="form-input" id="cfg-gh-branch" placeholder="main">
-            </div>
-            <div>
-                <label class="form-label" style="font-size:0.65rem">Personal Access Token</label>
-                <input class="form-input" id="cfg-gh-pat" type="password" placeholder="ghp_...">
-            </div>
+            <label class="form-label">Branch</label>
+            <input class="form-input" id="cfg-gh-branch" placeholder="main">
         </div>
 
         <button class="btn-save" onclick="saveSettings()">Salvar Configurações</button>
@@ -378,9 +368,7 @@ async function openSettings() {
     document.getElementById('cfg-receita').checked = cfg.receita_ws_enabled !== false;
     document.getElementById('cfg-rpm').value = cfg.receita_ws_rpm || 3;
     document.getElementById('cfg-autoupdate').checked = cfg.auto_update_enabled === true;
-    document.getElementById('cfg-gh-repo').value = cfg.github_repo || 'Bsgoncalves822/fam-app';
     document.getElementById('cfg-gh-branch').value = cfg.github_branch || 'main';
-    document.getElementById('cfg-gh-pat').value = cfg.github_pat || '';
     document.getElementById('modal-overlay').classList.add('open');
 }
 
@@ -396,9 +384,7 @@ async function saveSettings() {
         receita_ws_enabled: document.getElementById('cfg-receita').checked,
         receita_ws_rpm: parseInt(document.getElementById('cfg-rpm').value),
         auto_update_enabled: document.getElementById('cfg-autoupdate').checked,
-        github_repo: document.getElementById('cfg-gh-repo').value,
         github_branch: document.getElementById('cfg-gh-branch').value,
-        github_pat: document.getElementById('cfg-gh-pat').value,
     };
     await fetch('/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(cfg) });
     const msg = document.getElementById('save-msg');

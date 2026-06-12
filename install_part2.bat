@@ -9,6 +9,14 @@ echo.
 
 set INSTALL_DIR=C:\fam-app
 
+:: Verify this is a git checkout (required for auto-update)
+if not exist "%INSTALL_DIR%\.git" (
+    echo [AVISO] %INSTALL_DIR% nao e um repositorio git.
+    echo         A atualizacao automatica nao funcionara.
+    echo         Use bootstrap.bat para uma instalacao completa via git.
+    echo.
+)
+
 :: Verify Python now available
 python --version >nul 2>&1
 if errorlevel 1 (
