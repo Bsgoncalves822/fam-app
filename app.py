@@ -1,4 +1,4 @@
-import os, re, uuid, threading, zipfile, io, time, requests, logging, json, sqlite3
+import os, re, sys, uuid, threading, zipfile, io, time, requests, logging, json, sqlite3
 import pandas as pd
 import pdfplumber
 from datetime import timedelta, datetime
@@ -19,7 +19,11 @@ def load_config():
         "port": 5002,
         "comprovante_tolerance_days": 1,
         "receita_ws_enabled": True,
-        "receita_ws_rpm": 3
+        "receita_ws_rpm": 3,
+        "auto_update_enabled": False,
+        "github_repo": "Bsgoncalves822/fam-app",
+        "github_branch": "main",
+        "github_pat": ""
     }
     if os.path.exists(path):
         with open(path) as f:
@@ -913,7 +917,8 @@ def update_config():
     data = request.json
     cfg  = load_config()
     for k in ['codigo_fornecedor','codigo_folha','codigo_nao_identificado',
-              'comprovante_tolerance_days','receita_ws_enabled','receita_ws_rpm']:
+              'comprovante_tolerance_days','receita_ws_enabled','receita_ws_rpm',
+              'auto_update_enabled','github_repo','github_branch','github_pat']:
         if k in data:
             cfg[k] = data[k]
     save_config(cfg)
@@ -934,9 +939,88 @@ def confirm_fornecedores():
             conn.execute('UPDATE fornecedores SET confirmed=1 WHERE cnpj=?', (cnpj,))
     return jsonify({"success": True, "confirmed": len(cnpjs)})
 
+UPDATABLE_FILES = ['app.py', 'templates/index.html']
+LAST_COMMIT_PATH = os.path.join(BASE_DIR, 'data', 'last_commit.txt')
+
+def _gh_headers(cfg):
+    headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'fam-app-updater'}
+    if cfg.get('github_pat'):
+        headers['Authorization'] = f"Bearer {cfg['github_pat']}"
+    return headers
+
+def get_remote_commit_sha(cfg):
+    repo   = cfg['github_repo']
+    branch = cfg.get('github_branch', 'main')
+    url = f"https://api.github.com/repos/{repo}/commits/{branch}"
+    r = requests.get(url, headers=_gh_headers(cfg), timeout=10)
+    r.raise_for_status()
+    return r.json()['sha']
+
+def get_local_commit_sha():
+    if os.path.exists(LAST_COMMIT_PATH):
+        with open(LAST_COMMIT_PATH) as f:
+            return f.read().strip()
+    return None
+
+def save_local_commit_sha(sha):
+    with open(LAST_COMMIT_PATH, 'w') as f:
+        f.write(sha)
+
+def fetch_file_content(cfg, sha, filepath):
+    repo = cfg['github_repo']
+    url = f"https://raw.githubusercontent.com/{repo}/{sha}/{filepath}"
+    r = requests.get(url, headers=_gh_headers(cfg), timeout=15)
+    r.raise_for_status()
+    return r.content
+
+def check_for_updates():
+    cfg = load_config()
+    if not cfg.get('auto_update_enabled'):
+        return False
+    try:
+        remote_sha = get_remote_commit_sha(cfg)
+    except Exception as e:
+        logger.warning(f"Auto-update: could not reach GitHub ({e}). Skipping update check.")
+        return False
+
+    local_sha = get_local_commit_sha()
+    if local_sha == remote_sha:
+        logger.info("Auto-update: already up to date.")
+        return False
+
+    logger.info(f"Auto-update: new commit found ({remote_sha[:7]}). Updating...")
+    try:
+        for relpath in UPDATABLE_FILES:
+            local_path = os.path.join(BASE_DIR, relpath)
+            new_content = fetch_file_content(cfg, remote_sha, relpath)
+
+            if os.path.exists(local_path):
+                bak_path = local_path + '.bak'
+                with open(local_path, 'rb') as src, open(bak_path, 'wb') as dst:
+                    dst.write(src.read())
+                logger.info(f"Auto-update: backed up {relpath} -> {relpath}.bak")
+
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            with open(local_path, 'wb') as f:
+                f.write(new_content)
+            logger.info(f"Auto-update: wrote new {relpath}")
+
+        save_local_commit_sha(remote_sha)
+        logger.info(f"Auto-update: complete. Now at commit {remote_sha[:7]}. Restart required.")
+        return True
+    except Exception as e:
+        logger.error(f"Auto-update failed: {e}. Local files may be partially updated; .bak files available for rollback.")
+        return False
+
 if __name__ == '__main__':
     init_db()
     migrate_csvs_to_db()
+
+    if check_for_updates():
+        logger.info("Auto-update applied. Restarting process...")
+        python = sys.executable
+        os.execv(python, [python] + sys.argv)
+
     cfg = load_config()
     logger.info(f"FAM App starting on port {cfg['port']}")
     app.run(host='0.0.0.0', port=cfg['port'], debug=False)

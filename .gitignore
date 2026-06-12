@@ -4,6 +4,7 @@ outputs/
 logs/
 data/fam.db
 data/*.csv
+data/last_commit.txt
 
 # Config (company-specific)
 config.json
