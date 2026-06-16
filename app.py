@@ -1116,3 +1116,4 @@ if __name__ == '__main__':
     cfg = load_config()
     logger.info(f"FAM App starting on port {cfg['port']}")
     app.run(host='0.0.0.0', port=cfg['port'], debug=False)
+
