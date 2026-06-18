@@ -1,4 +1,4 @@
-﻿import os, re, sys, uuid, threading, zipfile, io, time, requests, logging, json, sqlite3, subprocess, shutil
+import os, re, uuid, threading, zipfile, io, time, requests, logging, json, sqlite3, sys, hashlib
 import pandas as pd
 import pdfplumber
 from datetime import timedelta, datetime
@@ -8,15 +8,112 @@ from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Force UTF-8 for stdout/stderr so logging with PT-BR accents (ã, ç, é...)
-# doesn't crash on Windows consoles using cp1252.
+# --- stdout/stderr encoding (Windows safe) ---
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ---------------------------------------------------------------------------
+# SELF-UPDATE
+# ---------------------------------------------------------------------------
+UPDATE_URL  = "https://raw.githubusercontent.com/Bsgoncalves822/fam-app/main/app.py"
+HASH_FILE   = os.path.join(BASE_DIR, 'data', 'update_hashes.json')
+BRANCH      = "main"
+
+def _md5(path):
+    h = hashlib.md5()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+def _load_hashes():
+    try:
+        with open(HASH_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_hashes(d):
+    os.makedirs(os.path.dirname(HASH_FILE), exist_ok=True)
+    with open(HASH_FILE, 'w') as f:
+        json.dump(d, f)
+
+def try_self_update():
+    """
+    1. Try git fetch + reset (preferred — updates ALL files).
+    2. Fall back to URL-fetch of app.py only.
+    Restarts process via os.execv if anything changed.
+    """
+    # --- attempt git ---
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['git', 'fetch', '--quiet', 'origin', BRANCH],
+            cwd=BASE_DIR, capture_output=True, timeout=15
+        )
+        if result.returncode == 0:
+            # Check if remote is ahead
+            diff = subprocess.run(
+                ['git', 'diff', '--name-only', f'HEAD..origin/{BRANCH}'],
+                cwd=BASE_DIR, capture_output=True, text=True, timeout=10,
+                encoding='utf-8', errors='replace'
+            )
+            changed_files = [l.strip() for l in diff.stdout.splitlines() if l.strip()]
+            if changed_files:
+                print(f"[UPDATE] Git: {len(changed_files)} arquivo(s) atualizado(s): {', '.join(changed_files)}")
+                subprocess.run(
+                    ['git', 'reset', '--hard', f'origin/{BRANCH}'],
+                    cwd=BASE_DIR, capture_output=True, timeout=30
+                )
+                # Clear pycache
+                pycache = os.path.join(BASE_DIR, '__pycache__')
+                if os.path.isdir(pycache):
+                    import shutil
+                    shutil.rmtree(pycache, ignore_errors=True)
+                print("[UPDATE] Reiniciando app...")
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            else:
+                print("[UPDATE] Git: ja esta na versao mais recente.")
+            return  # git worked, no need for URL fallback
+    except Exception as e:
+        print(f"[UPDATE] Git indisponivel ({e}), tentando URL fallback...")
+
+    # --- URL fallback: app.py only ---
+    try:
+        hashes = _load_hashes()
+        resp = requests.get(UPDATE_URL + f"?cb={int(time.time())}", timeout=10)
+        if resp.status_code != 200:
+            print(f"[UPDATE] URL fallback: HTTP {resp.status_code}, pulando.")
+            return
+        remote_content = resp.content
+        remote_hash = hashlib.md5(remote_content).hexdigest()
+        local_hash  = _md5(__file__) if os.path.exists(__file__) else ''
+        stored_hash = hashes.get('app.py', '')
+
+        if remote_hash != local_hash and remote_hash != stored_hash:
+            print(f"[UPDATE] Nova versao detectada via URL, aplicando...")
+            with open(__file__, 'wb') as f:
+                f.write(remote_content)
+            hashes['app.py'] = remote_hash
+            _save_hashes(hashes)
+            pycache = os.path.join(BASE_DIR, '__pycache__')
+            if os.path.isdir(pycache):
+                import shutil
+                shutil.rmtree(pycache, ignore_errors=True)
+            print("[UPDATE] Reiniciando app...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        else:
+            print("[UPDATE] URL fallback: ja esta na versao mais recente.")
+    except Exception as e:
+        print(f"[UPDATE] Falha no update ({e}), continuando com versao atual.")
+
+# ---------------------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------------------
 def load_config():
     path = os.path.join(BASE_DIR, 'config.json')
     defaults = {
@@ -26,20 +123,21 @@ def load_config():
         "port": 5002,
         "comprovante_tolerance_days": 1,
         "receita_ws_enabled": True,
-        "receita_ws_rpm": 3,
-        "auto_update_enabled": False,
-        "github_branch": "main"
+        "receita_ws_rpm": 3
     }
     if os.path.exists(path):
-        with open(path, encoding='utf-8') as f:
+        with open(path) as f:
             data = json.load(f)
         defaults.update(data)
     return defaults
 
 def save_config(cfg):
-    with open(os.path.join(BASE_DIR, 'config.json'), 'w', encoding='utf-8') as f:
-        json.dump(cfg, f, indent=4, ensure_ascii=False)
+    with open(os.path.join(BASE_DIR, 'config.json'), 'w') as f:
+        json.dump(cfg, f, indent=4)
 
+# ---------------------------------------------------------------------------
+# LOGGING
+# ---------------------------------------------------------------------------
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
 log_file = os.path.join(LOG_DIR, datetime.now().strftime('%Y-%m-%d') + '.log')
@@ -53,6 +151,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger('fam')
 
+# ---------------------------------------------------------------------------
+# FLASK APP
+# ---------------------------------------------------------------------------
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
 app.config['OUTPUT_FOLDER'] = os.path.join(BASE_DIR, 'outputs')
@@ -114,13 +215,11 @@ def init_db():
     logger.info("DB initialized")
 
 def migrate_csvs_to_db():
-    """Migrate CSVs to DB only if DB tables are empty — runs once."""
     data_dir = app.config['DATA_FOLDER']
     with get_db() as conn:
-        forn_count = conn.execute('SELECT COUNT(*) FROM fornecedores').fetchone()[0]
         forn_path = os.path.join(data_dir, 'fornecedores.csv')
-        if forn_count == 0 and os.path.exists(forn_path):
-            df = read_csv_any_encoding(forn_path, dtype=str).fillna('')
+        if os.path.exists(forn_path):
+            df = pd.read_csv(forn_path, dtype=str).fillna('')
             count = 0
             for _, row in df.iterrows():
                 cnpj = re.sub(r'[^\d]', '', row.get('CNPJ', ''))
@@ -129,11 +228,9 @@ def migrate_csvs_to_db():
                     conn.execute('INSERT OR IGNORE INTO fornecedores (cnpj, nome, source) VALUES (?,?,?)', (cnpj, nome, 'CADASTRO'))
                     count += 1
             logger.info(f"Migrated {count} fornecedores")
-
-        func_count = conn.execute('SELECT COUNT(*) FROM funcionarios').fetchone()[0]
         func_path = os.path.join(data_dir, 'funcionarios.csv')
-        if func_count == 0 and os.path.exists(func_path):
-            df = read_csv_any_encoding(func_path, dtype=str).fillna('')
+        if os.path.exists(func_path):
+            df = pd.read_csv(func_path, dtype=str).fillna('')
             count = 0
             for _, row in df.iterrows():
                 nome = row.get('NOME', '').strip()
@@ -141,11 +238,9 @@ def migrate_csvs_to_db():
                     conn.execute('INSERT OR IGNORE INTO funcionarios (nome) VALUES (?)', (nome,))
                     count += 1
             logger.info(f"Migrated {count} funcionarios")
-
-        cheq_count = conn.execute('SELECT COUNT(*) FROM cheques').fetchone()[0]
         cheq_path = os.path.join(data_dir, 'cheques.csv')
-        if cheq_count == 0 and os.path.exists(cheq_path):
-            df = read_csv_any_encoding(cheq_path, dtype=str).fillna('')
+        if os.path.exists(cheq_path):
+            df = pd.read_csv(cheq_path, dtype=str).fillna('')
             count = 0
             for _, row in df.iterrows():
                 num = row.get('Numero', '').strip()
@@ -167,36 +262,41 @@ def build_maps():
     cnpj_cache  = {row['cnpj']: row['nome'] for row in cache_rows}
     return forn_map, func_names, cheques_map, cnpj_cache
 
-# ── CNPJ / CPF extraction ────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# CSV ENCODING HELPER
+# ---------------------------------------------------------------------------
+def read_csv_any_encoding(path, sep=';'):
+    """Try encodings in order until one parses without errors."""
+    for enc in ('utf-8-sig', 'utf-8', 'cp1252', 'latin-1'):
+        try:
+            df = pd.read_csv(path, sep=sep, encoding=enc, dtype=str, on_bad_lines='warn')
+            logger.info(f"CSV lido com encoding={enc}")
+            return df
+        except Exception:
+            continue
+    raise ValueError(f"Nao foi possivel ler o arquivo CSV: {path}")
 
+# ---------------------------------------------------------------------------
+# ETL HELPERS
+# ---------------------------------------------------------------------------
 CNPJ_RE = re.compile(r'\b(\d{2}[\.\-]?\d{3}[\.\-]?\d{3}[\/]?\d{4}[\-]?\d{2}|\d{14})\b')
 CPF_RE  = re.compile(r'\b\d{3}[\.\-]?\d{3}[\.\-]?\d{3}[\-]?\d{2}\b')
-FAM_OWN_CNPJ = '04957294000103'   # FAM Metal's own CNPJ — self-transfers
+
+FAM_CNPJ = '04957294000103'  # FAM Metal — exclude from CNPJ lookups
 
 def clean_cnpj(raw): return re.sub(r'[^\d]', '', raw)
 
-def read_csv_any_encoding(path, **kwargs):
-    """Read a CSV trying UTF-8 first, falling back to latin-1/cp1252.
-    Handles CSVs exported from pt-BR Windows tools (Excel, SCI) which
-    are often latin-1/cp1252 instead of UTF-8."""
-    for enc in ('utf-8-sig', 'utf-8', 'cp1252', 'latin-1'):
-        try:
-            return pd.read_csv(path, encoding=enc, **kwargs)
-        except (UnicodeDecodeError, UnicodeError):
-            continue
-    # last resort: let pandas raise with its default error
-    return pd.read_csv(path, **kwargs)
-
 def extract_cnpj(text):
     text = str(text)
-    m = CNPJ_RE.search(text)
-    if m:
+    for m in CNPJ_RE.finditer(text):
         c = clean_cnpj(m.group())
+        if c == FAM_CNPJ:
+            continue
         return c
     m = re.search(r'(?<!\d)(\d{14})(?!\d)', text)
     if m:
         digits = m.group(1)
-        if digits[:2] != '00':
+        if digits[:2] != '00' and digits != FAM_CNPJ:
             return digits
     return None
 
@@ -204,122 +304,20 @@ def extract_cpf(text):
     m = CPF_RE.search(str(text))
     return re.sub(r'[^\d]', '', m.group()) if m else None
 
-def is_self_transfer(text):
-    """Returns True if the transaction is FAM paying itself."""
-    return FAM_OWN_CNPJ in re.sub(r'[^\d]', '', str(text))
+def parse_valor(v):
+    if not v: return 0.0
+    v = str(v).strip().replace('.', '').replace(',', '.')
+    try: return round(abs(float(v)), 2)
+    except: return 0.0
 
-# ── Name extraction — covers ALL real SCI complemento patterns ───────────────
-
-def extract_name_from_complemento(text):
-    """
-    Extract supplier/payee name from Complemento field.
-    Returns (name: str | None, origin_hint: str | None)
-    origin_hint is one of: 'BOLETO_109', 'BOLETO_144_PIX', 'BOLETO_PREF',
-                            'PIX_SICREDI', 'TRANSF', 'TED', 'DEBITO_TED',
-                            'DEBITO_CONV', 'CARTAO', 'LIQUIDACAO', None
-    """
-    text = str(text).strip()
-    if not text:
-        return None, None
-
-    # ── patterns ordered most-specific → least-specific ─────────────────────
-
-    # 1. "109 Pagamento de Boleto NAME - ref"  (419 rows, name-only, no CNPJ)
-    m = re.match(
-        r'^109\s+Pagamento\s+de\s+Boleto\s+(.+?)\s*-\s*[\d\.]+\s*$',
-        text, re.IGNORECASE)
-    if m: return _clean(m.group(1)), 'BOLETO_109'
-
-    # 2. "144 Pix - Enviado NAME - ref"
-    m = re.match(
-        r'^144\s+Pix\s+-\s+Enviado\s+(.+?)\s*-\s*[\d\.]+\s*$',
-        text, re.IGNORECASE)
-    if m: return _clean(m.group(1)), 'BOLETO_144_PIX'
-
-    # 3. "Pagamento de Boleto NAME - ref"  (mixed case, no numeric prefix)
-    m = re.match(
-        r'^Pagamento\s+de\s+Boleto\s+(.+?)\s*-\s*[\d\.]+\s*$',
-        text, re.IGNORECASE)
-    if m: return _clean(m.group(1)), 'BOLETO_PREF'
-
-    # 4. "Pix - Enviado NAME - ref"
-    m = re.match(
-        r'^Pix\s+-\s+Enviado\s+(.+?)\s*-\s*[\d\.]+\s*$',
-        text, re.IGNORECASE)
-    if m: return _clean(m.group(1)), 'BOLETO_PREF'
-
-    # 5. "470 Transferência enviada NAME - ref" or "Transferência enviada NAME - ref"
-    m = re.match(
-        r'^(?:470\s+)?Transfer[eê]ncia\s+enviada\s+(.+?)\s*-\s*[\d\.]+(?:\.[\d]+)*\s*$',
-        text, re.IGNORECASE)
-    if m: return _clean(m.group(1)), 'TRANSF'
-
-    # 6. "TRANSF ENTRE CONTAS CNPJ NAME - ref"
-    m = re.match(
-        r'^TRANSF\s+ENTRE\s+CONTAS\s+\d+\s+(.+?)\s*-\s*\w+\d+\s*$',
-        text, re.IGNORECASE)
-    if m: return _clean(m.group(1)), 'TRANSF'
-
-    # 7. "TED Transf.Eletr.Disponiv BANK AGENCIA CNPJ NAME - - ref"
-    m = re.match(
-        r'^TED\s+Transf[\w\.]+\s+\d+\s+\d+\s+\d+\s+(.+?)\s*-\s*-\s*[\d\.]+\s*$',
-        text, re.IGNORECASE)
-    if m: return _clean(m.group(1)), 'TED'
-
-    # 8. "DEBITO TED/IB CNPJ NAME - ref"
-    m = re.match(
-        r'^DEBITO\s+TED/IB\s+\d+\s+(.+?)\s*-\s*\w+\d+\s*$',
-        text, re.IGNORECASE)
-    if m: return _clean(m.group(1)), 'DEBITO_TED'
-
-    # 9. "DEBITO CONVENIOS CNPJ NAME - NAME"
-    m = re.match(
-        r'^DEBITO\s+CONVENIOS\s+\d+\s+(.+?)\s*-\s*.+$',
-        text, re.IGNORECASE)
-    if m: return _clean(m.group(1)), 'DEBITO_CONV'
-
-    # 10. "Compra com Cartão NAME - ref"
-    m = re.match(
-        r'^Compra\s+com\s+Cart[aã]o\s+(.+?)\s*-\s*[\d\.]+\s*$',
-        text, re.IGNORECASE)
-    if m: return _clean(m.group(1)), 'CARTAO'
-
-    # 11. "PAGAMENTO PIX [SICREDI] CNPJ/CPF NAME - suffix"
-    #     Name comes AFTER the CNPJ/CPF token
-    m = re.match(
-        r'^PAGAMENTO\s+PIX(?:\s+SICREDI)?\s+[\d\.\/\-]+\s+(.+?)\s*-\s*(?:PIX_DEB|CX\w+|I\d+)\s*$',
-        text, re.IGNORECASE)
-    if m: return _clean(m.group(1)), 'PIX_SICREDI'
-
-    # 12. "LIQUIDACAO BOLETO [SICREDI] CNPJ NAME -"
-    m = re.match(
-        r'^LIQUIDACAO\s+BOLETO(?:\s+SICREDI)?\s+[\d\.\/\-]+\s+(.+?)\s*-\s*.*$',
-        text, re.IGNORECASE)
-    if m:
-        name = _clean(m.group(1))
-        if name:
-            # Strip parenthetical aliases like "(quero quero)"
-            name = re.sub(r'\s*\(.*?\)', '', name).strip()
-        if name:
-            return name, 'LIQUIDACAO'
-
-    return None, None
-
-
-def _clean(name):
-    """Strip trailing punctuation/spaces, uppercase, min length 2."""
-    name = str(name).strip().rstrip(' -').strip()
-    name = re.sub(r'\s+', ' ', name)
-    if len(name) < 2:
-        return None
-    return name.upper()
-
+def parse_date(d_str):
+    try: return datetime.strptime(str(d_str).strip(), '%d/%m/%Y')
+    except: return None
 
 def extract_pix_name(complemento):
-    """Legacy — kept for employee folha matching. Returns raw name after PIX CNPJ/CPF."""
     if not complemento: return None
     m = re.search(
-        r'(?:PAGAMENTO\s+)?PIX(?:\s+SICREDI)?\s+[\d.\/\-]+\s+(.+?)(?:\s+-\s*(?:PIX_|CX|I00).*)?$',
+        r'(?:PAGAMENTO\s+)?PIX\s+(?:\w+\s+)?[\d.\/\-]+\s+(.+?)(?:\s+-\s*(?:PIX_|CX|I00).*)?$',
         str(complemento).strip(), re.IGNORECASE
     )
     return m.group(1).strip().rstrip('- ').upper() if m else None
@@ -343,14 +341,33 @@ def extract_cheque_number(complemento):
     m = re.search(r'(\d{4})\s*$', str(complemento))
     return m.group(1) if m else None
 
-def parse_valor(v):
-    if not v: return 0.0
-    v = str(v).strip().replace('.', '').replace(',', '.')
-    try: return round(abs(float(v)), 2)
-    except: return 0.0
+def extract_fallback_name(text):
+    if not text: return None
+    s = str(text).strip()
+    patterns = [
+        r'Pagamento\s+de\s+Boleto\s+([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*(?:-\s*[\d\.]+.*)?$',
+        r'LIQUIDACAO\s+BOLETO(?:\s+\w+)?\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
+        r'PAG(?:AMENTO)?\s+(?:DE\s+)?BOLETO(?:\s+\w+)?\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
+        r'PAGTO\s+BOLETO\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
+        r'DEBITO\s+TED[\w\/]*\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
+        r'TED\s+PARA\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
+        r'Transfer\u00eancia\s+enviada\s+[\w\s]+?\s+-\s+[\d\.]+\s+([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
+        r'PAGAMENTO\s+PIX(?:\s+\w+)?\s+[\d\.\/\-]+\s+([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, s, re.IGNORECASE)
+        if m:
+            name = m.group(1).strip().rstrip('- ')
+            if len(name) >= 4:
+                return name.upper()
+    return None
 
-def parse_date(d_str):
-    try: return datetime.strptime(str(d_str).strip(), '%d/%m/%Y')
+def extract_cnpj_from_pdf(filename, zip_path):
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf: data = zf.read(filename)
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            text = '\n'.join(p.extract_text() or '' for p in pdf.pages[:2])
+        return extract_cnpj(text)
     except: return None
 
 def parse_filename(fname):
@@ -386,19 +403,6 @@ def lookup_comprovante(date_obj, valor, lookup):
     if not results: return None
     results.sort(key=lambda x: abs(x['delta']))
     return results[0]
-
-def extract_cnpj_from_pdf(filename, open_zf):
-    """Extract recipient CNPJ from comprovante PDF using an already-open ZipFile handle."""
-    try:
-        data = open_zf.read(filename)
-        with pdfplumber.open(io.BytesIO(data)) as pdf:
-            text = '\n'.join(p.extract_text() or '' for p in pdf.pages[:2])
-        for m in CNPJ_RE.finditer(text):
-            cnpj = clean_cnpj(m.group())
-            if len(cnpj) == 14 and cnpj != FAM_OWN_CNPJ:
-                return cnpj
-        return None
-    except: return None
 
 def batch_lookup_cnpjs(unknown_cnpjs, task_id, cnpj_cache):
     cfg = load_config()
@@ -473,13 +477,11 @@ def build_excel(results, new_fornecedores, out_path, cfg):
     yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
     red_fill    = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     blue_fill   = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
-    grey_fill   = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
     for r in results:
         ws.append([r.get(k, '') for k in col_keys])
-        if r['STATUS'] == 'TRANSFERENCIA_PROPRIA': fill = grey_fill
-        elif r['STATUS'] == 'OK':                  fill = green_fill
-        elif r['STATUS'] == 'REVISAR':             fill = blue_fill if r.get('ORIGEM') == 'RECEITA_WS' else yellow_fill
-        else:                                       fill = red_fill
+        if r['STATUS'] == 'OK':           fill = green_fill
+        elif r['STATUS'] == 'REVISAR':    fill = blue_fill if r.get('ORIGEM') == 'RECEITA_WS' else yellow_fill
+        else:                             fill = red_fill
         for cell in ws[ws.max_row]:
             cell.fill      = fill
             cell.alignment = Alignment(vertical='center')
@@ -500,6 +502,55 @@ def build_excel(results, new_fornecedores, out_path, cfg):
         ws2.column_dimensions['C'].width = 22
     wb.save(out_path)
 
+# ---------------------------------------------------------------------------
+# MAIN ETL
+# ---------------------------------------------------------------------------
+
+# Column schemas for different SCI export formats
+_COLS_12 = ['Transacao','Chave','Lote','Data','Debito','Participante a debito',
+            'Credito','Participante a credito','Valor','Historico','Complemento','No Doc.']
+_COLS_7  = ['Data','Debito','Credito','Valor','Historico','Complemento','No Doc.']
+
+def _map_sci_columns(df):
+    """
+    Map raw SCI CSV columns to the standard internal names regardless of
+    which export variant the accountant used (12-col full, 13-col with
+    leading index, or 7-col slim 'Impressão de campos da consulta').
+    Returns df with columns renamed to _COLS_12 or _COLS_7 standard.
+    Raises ValueError if the column count is unrecognised.
+    """
+    ncols = len(df.columns)
+    if ncols == len(_COLS_12) + 1:
+        # 13-col: leading unnamed index column from some SCI exports
+        df = df.iloc[:, 1:]
+        df.columns = _COLS_12
+    elif ncols == len(_COLS_12):
+        df.columns = _COLS_12
+    elif ncols == len(_COLS_7):
+        df.columns = _COLS_7
+    else:
+        # Last resort: try to match by normalised header name
+        norm = {re.sub(r'[^a-z]', '', c.lower()): c for c in df.columns}
+        needed = {'data': 'Data', 'valor': 'Valor', 'historico': 'Historico',
+                  'complemento': 'Complemento', 'debito': 'Debito', 'credito': 'Credito'}
+        rename = {}
+        missing = []
+        for key, target in needed.items():
+            match = next((orig for nk, orig in norm.items() if key in nk), None)
+            if match:
+                rename[match] = target
+            else:
+                missing.append(target)
+        if missing:
+            raise ValueError(
+                f"Formato CSV desconhecido ({ncols} colunas). "
+                f"Colunas obrigatorias nao encontradas: {missing}. "
+                f"Colunas presentes: {list(df.columns)}"
+            )
+        df = df.rename(columns=rename)
+        logger.warning(f"CSV: formato nao padrao ({ncols} cols), mapeado por nome.")
+    return df
+
 def run_fam_etl(task_id, sci_path, zip_path):
     tasks[task_id]['status'] = 'RUNNING'
     cfg = load_config()
@@ -514,15 +565,21 @@ def run_fam_etl(task_id, sci_path, zip_path):
         log(f"Dados carregados: {len(forn_map)} fornecedores, {len(func_names)} funcionarios, {len(cheques_map)} cheques, {len(cnpj_cache)} CNPJs em cache.")
 
         log("Lendo SCI Bank CSV...")
-        try: df = pd.read_csv(sci_path, sep=';', encoding='utf-8', dtype=str)
-        except: df = pd.read_csv(sci_path, sep=';', encoding='latin-1', dtype=str)
-        std_cols = ['Transacao','Chave','Lote','Data','Debito','Participante a debito',
-                    'Credito','Participante a credito','Valor','Historico','Complemento','No Doc.']
-        if len(df.columns) == len(std_cols) + 1:
-            df = df.iloc[:, 1:]
-        df.columns = std_cols[:len(df.columns)]
+        df_raw = read_csv_any_encoding(sci_path)
+        try:
+            df = _map_sci_columns(df_raw)
+        except ValueError as e:
+            raise ValueError(str(e))
+
         df.fillna('', inplace=True)
         df['Valor_Float'] = df['Valor'].apply(parse_valor)
+
+        # Normalise column names that differ between formats
+        if 'Historico' not in df.columns and 'Hist\u00f3rico' in df.columns:
+            df.rename(columns={'Hist\u00f3rico': 'Historico'}, inplace=True)
+        if 'Complemento' not in df.columns:
+            df['Complemento'] = ''
+
         log(f"{len(df)} transacoes carregadas.")
 
         log("Indexando Comprovantes ZIP...")
@@ -534,7 +591,7 @@ def run_fam_etl(task_id, sci_path, zip_path):
         unknown_cnpjs = set()
         for _, row in df.iterrows():
             cnpj = extract_cnpj(str(row.get('Complemento', '')))
-            if cnpj and len(cnpj) == 14 and cnpj not in forn_map and cnpj != FAM_OWN_CNPJ:
+            if cnpj and len(cnpj) == 14 and cnpj not in forn_map:
                 unknown_cnpjs.add(cnpj)
         log(f"{len(unknown_cnpjs)} CNPJs desconhecidos encontrados.")
 
@@ -548,129 +605,92 @@ def run_fam_etl(task_id, sci_path, zip_path):
         CODE_FOLHA = cfg['codigo_folha']
         CODE_NAO   = cfg['codigo_nao_identificado']
 
-        stat_counts = {'self': 0, 'cadastro': 0, 'receita': 0, 'comp_name': 0, 'folha': 0, 'cheque': 0, 'pdf': 0, 'nao': 0}
-        total_rows = len(df)
-
-        with zipfile.ZipFile(zip_path, 'r') as open_zf:
-         for idx, row in df.iterrows():
+        for idx, row in df.iterrows():
             comp_text = str(row.get('Complemento', ''))
             hist_text = str(row.get('Historico', ''))
             res = {
                 'Data': row['Data'], 'Historico': hist_text, 'Complemento': comp_text,
-                'Valor': row['Valor'], 'Debito': row['Debito'], 'Credito': row['Credito'],
+                'Valor': row['Valor'], 'Debito': row.get('Debito', ''), 'Credito': row.get('Credito', ''),
                 'CODIGO': CODE_NAO, 'PARTICIPANTE': '', 'CNPJ_IDENTIFICADO': '',
                 'FOLHA': '', 'CHEQUE_NUM': '', 'COMPROVANTE': '',
-                'STATUS': 'NAO ENCONTRADO', 'ORIGEM': '', 'CONFIRMAR': ''
+                'STATUS': 'NAO ENCONTRADO', 'ORIGEM': ''
             }
-
-            # ── Self-transfer detection ──────────────────────────────────────
-            if is_self_transfer(comp_text):
-                res['STATUS']      = 'TRANSFERENCIA_PROPRIA'
-                res['PARTICIPANTE'] = 'FAM METAL (TRANSFERENCIA PROPRIA)'
-                res['ORIGEM']       = 'SELF'
-                res['CODIGO']       = ''
-                stat_counts['self'] += 1
-                results.append(res)
-                continue
 
             cnpj = extract_cnpj(comp_text)
             cpf  = extract_cpf(comp_text)
 
-            # ── A: CNPJ lookup ───────────────────────────────────────────────
             if cnpj and cnpj in forn_map:
                 res['PARTICIPANTE']      = forn_map[cnpj]
                 res['CNPJ_IDENTIFICADO'] = cnpj
                 res['ORIGEM']            = 'CADASTRO'
                 res['CODIGO']            = CODE_FORN
-                stat_counts['cadastro'] += 1
-
             elif cnpj and cnpj in cnpj_cache and cnpj_cache[cnpj]:
                 res['PARTICIPANTE']      = cnpj_cache[cnpj]
                 res['CNPJ_IDENTIFICADO'] = cnpj
                 res['ORIGEM']            = 'RECEITA_WS'
                 res['CODIGO']            = CODE_FORN
                 new_fornecedores[cnpj]   = cnpj_cache[cnpj]
-                stat_counts['receita'] += 1
-
             elif cnpj:
                 res['CNPJ_IDENTIFICADO'] = cnpj
-
+                fallback = extract_fallback_name(hist_text) or extract_fallback_name(comp_text)
+                if fallback:
+                    res['PARTICIPANTE'] = '(?) ' + fallback
+                    res['ORIGEM']       = 'COMPLEMENTO'
+                    res['CODIGO']       = CODE_FORN
             elif cpf:
                 res['CNPJ_IDENTIFICADO'] = 'CPF:' + cpf
-
-            # ── B: Name extraction from Complemento text ─────────────────────
-            # Runs for ALL rows — fills PARTICIPANTE when CNPJ lookup missed
-            if not res['PARTICIPANTE']:
-                fallback_name, origin_hint = extract_name_from_complemento(comp_text)
-                if fallback_name:
-                    res['PARTICIPANTE'] = '(?) ' + fallback_name
-                    res['ORIGEM']       = origin_hint or 'COMPLEMENTO'
+                fallback = extract_fallback_name(hist_text) or extract_fallback_name(comp_text)
+                if fallback:
+                    res['PARTICIPANTE'] = '(?) ' + fallback
+                    res['ORIGEM']       = 'COMPLEMENTO'
                     res['CODIGO']       = CODE_FORN
-                    stat_counts['comp_name'] += 1
+            else:
+                fallback = extract_fallback_name(hist_text) or extract_fallback_name(comp_text)
+                if fallback:
+                    res['PARTICIPANTE'] = '(?) ' + fallback
+                    res['ORIGEM']       = 'COMPLEMENTO'
+                    res['CODIGO']       = CODE_FORN
 
-            # ── C: PIX folha detection (employee name match) ─────────────────
             pix_name = extract_pix_name(comp_text)
-            if pix_name and func_names:
+            if pix_name:
                 is_folha, reason = match_employee_name(pix_name, func_names)
                 if is_folha:
                     res['FOLHA']  = 'SIM'
                     res['CODIGO'] = CODE_FOLHA
                     res['ORIGEM'] = 'FOLHA'
-                    stat_counts['folha'] += 1
-                    if not res['PARTICIPANTE'] or res['PARTICIPANTE'].startswith('(?)'):
+                    if not res['PARTICIPANTE']:
                         res['PARTICIPANTE'] = reason
 
-            # ── D: Cheque lookup ─────────────────────────────────────────────
-            if 'CHEQUE' in comp_text.upper():
+            if 'CHEQUE' in hist_text.upper() or 'CHEQUE' in comp_text.upper():
                 ch_num = extract_cheque_number(comp_text)
                 if ch_num and ch_num in cheques_map:
                     portador = cheques_map[ch_num]
                     res['CHEQUE_NUM']   = ch_num
                     res['PARTICIPANTE'] = portador
                     res['ORIGEM']       = 'CHEQUE'
-                    stat_counts['cheque'] += 1
                     if any(k in portador.upper() for k in ['SALARIO','FAM METAL']):
                         res['CODIGO'] = CODE_FOLHA
                         res['FOLHA']  = 'SIM'
                     else:
                         res['CODIGO'] = CODE_FORN
 
-            # ── E: Comprovante match by date+value ───────────────────────────
             dt_obj = parse_date(row['Data'])
             comp_match = lookup_comprovante(dt_obj, row['Valor_Float'], comp_lookup)
             if comp_match:
                 res['COMPROVANTE'] = comp_match['filename']
-                if not res['PARTICIPANTE'] or res['PARTICIPANTE'].startswith('(?)'):
-                    pdf_cnpj = extract_cnpj_from_pdf(comp_match['filename'], open_zf)
+                if not res['PARTICIPANTE']:
+                    pdf_cnpj = extract_cnpj_from_pdf(comp_match['filename'], zip_path)
                     if pdf_cnpj and pdf_cnpj in forn_map:
                         res['PARTICIPANTE']      = forn_map[pdf_cnpj]
                         res['CNPJ_IDENTIFICADO'] = pdf_cnpj
                         res['ORIGEM']            = 'PDF'
                         res['CODIGO']            = CODE_FORN
-                        stat_counts['pdf'] += 1
 
-            # ── Status ───────────────────────────────────────────────────────
-            has_participant = bool(res['PARTICIPANTE']) and res['PARTICIPANTE'] != '(?) '
-            has_comprovante = bool(res['COMPROVANTE'])
-
-            # Strip the (?) prefix from PARTICIPANTE if we also have a comprovante
-            # — confirmed enough to be OK
-            if has_participant and res['PARTICIPANTE'].startswith('(?)') and has_comprovante:
-                res['PARTICIPANTE'] = res['PARTICIPANTE'][4:]
-
-            if has_participant and has_comprovante:
-                res['STATUS'] = 'OK'
-            elif has_participant or has_comprovante:
-                res['STATUS'] = 'REVISAR'
-            else:
-                stat_counts['nao'] += 1
+            if res['PARTICIPANTE'] and res['COMPROVANTE']:   res['STATUS'] = 'OK'
+            elif res['PARTICIPANTE'] or res['COMPROVANTE']:  res['STATUS'] = 'REVISAR'
 
             results.append(res)
-            if (idx + 1) % 1000 == 0:
-                pct = (idx + 1) / total_rows * 100
-                tasks[task_id]['log'][-1] = f"Enriquecendo transacoes... {idx+1}/{total_rows} ({pct:.0f}%)"
 
-        # end of open_zf context
         if new_fornecedores:
             with get_db() as conn:
                 for cnpj, nome in new_fornecedores.items():
@@ -681,21 +701,18 @@ def run_fam_etl(task_id, sci_path, zip_path):
         out_path = os.path.join(app.config['OUTPUT_FOLDER'], f"{task_id}.xlsx")
         build_excel(results, new_fornecedores, out_path, cfg)
 
-        ok_c   = sum(1 for r in results if r['STATUS'] == 'OK')
-        rev_c  = sum(1 for r in results if r['STATUS'] == 'REVISAR')
-        nao_c  = sum(1 for r in results if r['STATUS'] == 'NAO ENCONTRADO')
-        self_c = sum(1 for r in results if r['STATUS'] == 'TRANSFERENCIA_PROPRIA')
-        total  = len(results)
+        ok_c  = sum(1 for r in results if r['STATUS'] == 'OK')
+        rev_c = sum(1 for r in results if r['STATUS'] == 'REVISAR')
+        nao_c = sum(1 for r in results if r['STATUS'] == 'NAO ENCONTRADO')
+        total = len(results)
 
         with get_db() as conn:
-            conn.execute('INSERT INTO run_history (run_date,total_rows,ok_count,revisar_count,nao_encontrado_count,novos_fornecedores) VALUES (?,?,?,?,?,?)',
-                        (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), total, ok_c, rev_c, nao_c, len(new_fornecedores)))
+            conn.execute('INSERT INTO run_history (total_rows,ok_count,revisar_count,nao_encontrado_count,novos_fornecedores) VALUES (?,?,?,?,?)',
+                        (total, ok_c, rev_c, nao_c, len(new_fornecedores)))
 
         tasks[task_id]['status'] = 'DONE'
         tasks[task_id]['file']   = out_path
-        log(f"--- RESUMO ---")
-        log(f"OK: {ok_c} ({ok_c/total*100:.1f}%) | REVISAR: {rev_c} ({rev_c/total*100:.1f}%) | NAO ENCONTRADO: {nao_c} ({nao_c/total*100:.1f}%) | PROPRIA: {self_c}")
-        log(f"Origens — CADASTRO: {stat_counts['cadastro']} | RECEITA_WS: {stat_counts['receita']} | COMPLEMENTO: {stat_counts['comp_name']} | FOLHA: {stat_counts['folha']} | CHEQUE: {stat_counts['cheque']} | PDF: {stat_counts['pdf']} | SELF: {stat_counts['self']} | NAO: {stat_counts['nao']}")
+        log(f"OK: {ok_c} ({ok_c/total*100:.1f}%) | REVISAR: {rev_c} ({rev_c/total*100:.1f}%) | NAO ENCONTRADO: {nao_c} ({nao_c/total*100:.1f}%)")
         log(f"Novos fornecedores via API: {len(new_fornecedores)}")
         log("Processamento concluido com sucesso!")
 
@@ -706,6 +723,9 @@ def run_fam_etl(task_id, sci_path, zip_path):
         tasks[task_id]['log'].append(traceback.format_exc())
         logger.error(f"Run failed: {e}")
 
+# ---------------------------------------------------------------------------
+# FLASK ROUTES
+# ---------------------------------------------------------------------------
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -761,168 +781,34 @@ def get_data(ref_type):
             rows = conn.execute('SELECT numero as Numero, portador as Portador FROM cheques').fetchall()
     return jsonify([dict(r) for r in rows])
 
-SHEET_ALIASES = {
-    'funcionarios': ['funcionarios', 'funcionário', 'funcionários'],
-    'fornecedores': ['fornecedores', 'fornecedor'],
-    'cheques': ['cheques', 'cheque'],
-}
-
-def import_funcionarios_df(df, conn):
-    df = df.rename(columns={c: str(c).strip().upper() for c in df.columns})
-    count = 0
-    for _, row in df.iterrows():
-        nome = str(row.get('NOME', '')).strip()
-        if nome and nome.lower() != 'nan':
-            conn.execute('INSERT OR IGNORE INTO funcionarios (nome) VALUES (?)', (nome,))
-            count += 1
-    return count
-
-def import_fornecedores_df(df, conn):
-    df = df.rename(columns={c: str(c).strip().upper() for c in df.columns})
-    count = 0
-    for _, row in df.iterrows():
-        cnpj = re.sub(r'[^\d]', '', str(row.get('CNPJ', '')))
-        nome = str(row.get('NOME', '')).strip()
-        if cnpj and nome and nome.lower() != 'nan':
-            conn.execute('INSERT OR REPLACE INTO fornecedores (cnpj, nome, source, confirmed) VALUES (?,?,?,1)', (cnpj, nome, 'CADASTRO'))
-            count += 1
-    return count
-
-def import_cheques_df(df, conn):
-    df = df.rename(columns={c: str(c).strip().upper() for c in df.columns})
-    count = 0
-    for _, row in df.iterrows():
-        num = str(row.get('NUMERO', '')).strip()
-        por = str(row.get('PORTADOR', '')).strip()
-        if num and por and num.lower() != 'nan' and por.lower() != 'nan':
-            conn.execute('INSERT OR REPLACE INTO cheques (numero, portador) VALUES (?,?)', (num, por))
-            count += 1
-    return count
-
-IMPORTERS = {
-    'funcionarios': import_funcionarios_df,
-    'fornecedores': import_fornecedores_df,
-    'cheques': import_cheques_df,
-}
-
 @app.route('/data/<ref_type>', methods=['POST'])
 def update_data(ref_type):
     if ref_type not in ['funcionarios', 'fornecedores', 'cheques']:
         return jsonify({"error": "Invalid"}), 400
     if 'file' not in request.files: return jsonify({"error": "No file"}), 400
     f = request.files['file']
-    filename = f.filename or ''
-    ext = os.path.splitext(filename)[1].lower()
-    path = os.path.join(app.config['DATA_FOLDER'], f"{ref_type}_upload{ext or '.csv'}")
+    path = os.path.join(app.config['DATA_FOLDER'], f"{ref_type}_upload.csv")
     f.save(path)
-
-    counts = {}
-
-    if ext in ('.xlsx', '.xls'):
-        xls = pd.ExcelFile(path)
-        sheet_map = {s.strip().lower(): s for s in xls.sheet_names}
-
-        with get_db() as conn:
-            for rtype, aliases in SHEET_ALIASES.items():
-                match = next((sheet_map[a] for a in aliases if a in sheet_map), None)
-                if match:
-                    df = pd.read_excel(path, sheet_name=match, dtype=str).fillna('')
-                    counts[rtype] = IMPORTERS[rtype](df, conn)
-
-        if not counts:
-            return jsonify({"error": "Nenhuma aba reconhecida (Funcionarios/Fornecedores/Cheques)"}), 400
-
-    else:
-        df = read_csv_any_encoding(path, dtype=str).fillna('')
-        with get_db() as conn:
-            counts[ref_type] = IMPORTERS[ref_type](df, conn)
-
-    return jsonify({"success": True, "imported": counts})
-
-@app.route('/template/download')
-def download_template():
-    out_path = os.path.join(app.config['OUTPUT_FOLDER'], 'FAM_Modelo_Importacao.xlsx')
-    wb = Workbook()
-
-    header_fill = PatternFill(start_color="0D0F12", end_color="0D0F12", fill_type="solid")
-    header_font = Font(bold=True, color="00D4FF", size=10)
-    header_align = Alignment(horizontal='center', vertical='center')
-
-    def style_header(ws, headers, widths):
-        for i, (h, w) in enumerate(zip(headers, widths), 1):
-            cell = ws.cell(row=1, column=i, value=h)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = header_align
-            ws.column_dimensions[get_column_letter(i)].width = w
-        ws.row_dimensions[1].height = 22
-        ws.freeze_panes = 'A2'
-
-    ws1 = wb.active
-    ws1.title = "Funcionarios"
-    style_header(ws1, ['NOME'], [40])
-    ws1.append(['JOAO DA SILVA SANTOS'])
-
-    ws2 = wb.create_sheet("Fornecedores")
-    style_header(ws2, ['CNPJ', 'NOME'], [22, 45])
-    ws2.append(['12345678000199', 'EMPRESA EXEMPLO LTDA'])
-
-    ws3 = wb.create_sheet("Cheques")
-    style_header(ws3, ['Numero', 'Portador'], [15, 40])
-    ws3.append(['1234', 'FORNECEDOR EXEMPLO'])
-
-    ws4 = wb.create_sheet("Instrucoes")
-    ws4.column_dimensions['A'].width = 90
-    instructions = [
-        "INSTRUCOES DE USO — MODELO DE IMPORTACAO FAM",
-        "",
-        "Este arquivo possui 3 abas de dados: Funcionarios, Fornecedores, Cheques.",
-        "",
-        "Voce pode preencher quantas abas quiser neste mesmo arquivo.",
-        "Ao subir o arquivo em qualquer um dos 3 campos de upload (Funcionarios,",
-        "Fornecedores ou Cheques), o sistema vai ler TODAS as abas presentes",
-        "e atualizar cada categoria correspondente automaticamente.",
-        "",
-        "Tambem e possivel enviar apenas um CSV simples de uma categoria,",
-        "no formato das colunas mostradas na aba correspondente.",
-        "",
-        "FUNCIONARIOS: coluna NOME (nome completo do colaborador)",
-        "FORNECEDORES: colunas CNPJ (somente numeros, 14 digitos) e NOME",
-        "CHEQUES: colunas Numero (numero do cheque) e Portador (nome do beneficiario)",
-        "",
-        "Nao altere os nomes dos cabecalhos (primeira linha) das abas.",
-        "Linhas de exemplo podem ser apagadas ou sobrescritas.",
-    ]
-    for i, line in enumerate(instructions, 1):
-        cell = ws4.cell(row=i, column=1, value=line)
-        if i == 1:
-            cell.font = Font(bold=True, color="00D4FF", size=12)
-
-    wb.save(out_path)
-    return send_file(out_path, as_attachment=True, download_name='FAM_Modelo_Importacao.xlsx')
-
-@app.route('/data/<ref_type>/delete', methods=['POST'])
-def delete_data(ref_type):
-    if ref_type not in ['funcionarios', 'fornecedores', 'cheques']:
-        return jsonify({"error": "Invalid"}), 400
-    data = request.json
+    df = read_csv_any_encoding(path)
+    df.fillna('', inplace=True)
     with get_db() as conn:
         if ref_type == 'fornecedores':
-            cnpj = re.sub(r'[^\d]', '', data.get('key', ''))
-            conn.execute('DELETE FROM fornecedores WHERE cnpj=?', (cnpj,))
+            for _, row in df.iterrows():
+                cnpj = re.sub(r'[^\d]', '', row.get('CNPJ', ''))
+                nome = row.get('NOME', '').strip()
+                if cnpj and nome:
+                    conn.execute('INSERT OR REPLACE INTO fornecedores (cnpj, nome, source, confirmed) VALUES (?,?,?,1)', (cnpj, nome, 'CADASTRO'))
         elif ref_type == 'funcionarios':
-            conn.execute('DELETE FROM funcionarios WHERE nome=?', (data.get('key', ''),))
+            for _, row in df.iterrows():
+                nome = row.get('NOME', '').strip()
+                if nome:
+                    conn.execute('INSERT OR IGNORE INTO funcionarios (nome) VALUES (?)', (nome,))
         else:
-            conn.execute('DELETE FROM cheques WHERE numero=?', (data.get('key', ''),))
-    return jsonify({"success": True})
-
-@app.route('/data/clear/<ref_type>', methods=['POST'])
-def clear_data(ref_type):
-    """Wipe entire reference table — use with caution."""
-    if ref_type not in ['funcionarios', 'fornecedores', 'cheques']:
-        return jsonify({"error": "Invalid"}), 400
-    with get_db() as conn:
-        conn.execute(f'DELETE FROM {ref_type}')
+            for _, row in df.iterrows():
+                num = row.get('Numero', '').strip()
+                por = row.get('Portador', '').strip()
+                if num and por:
+                    conn.execute('INSERT OR REPLACE INTO cheques (numero, portador) VALUES (?,?)', (num, por))
     return jsonify({"success": True})
 
 @app.route('/config', methods=['GET'])
@@ -934,8 +820,7 @@ def update_config():
     data = request.json
     cfg  = load_config()
     for k in ['codigo_fornecedor','codigo_folha','codigo_nao_identificado',
-              'comprovante_tolerance_days','receita_ws_enabled','receita_ws_rpm',
-              'auto_update_enabled','github_branch']:
+              'comprovante_tolerance_days','receita_ws_enabled','receita_ws_rpm']:
         if k in data:
             cfg[k] = data[k]
     save_config(cfg)
@@ -956,165 +841,13 @@ def confirm_fornecedores():
             conn.execute('UPDATE fornecedores SET confirmed=1 WHERE cnpj=?', (cnpj,))
     return jsonify({"success": True, "confirmed": len(cnpjs)})
 
-def _git_available():
-    try:
-        subprocess.run(['git', '--version'], capture_output=True, timeout=5)
-        return True
-    except Exception:
-        return False
-
-def _clear_pycache():
-    for root, dirs, files in os.walk(BASE_DIR):
-        if '__pycache__' in dirs:
-            shutil.rmtree(os.path.join(root, '__pycache__'), ignore_errors=True)
-
-def _update_via_git(branch):
-    """Update the local checkout via `git fetch` + `git reset --hard`.
-    Requires the app directory to be a git clone of the repo."""
-    git_dir = os.path.join(BASE_DIR, '.git')
-    if not os.path.isdir(git_dir):
-        return None  # not a git checkout -> let caller fall back
-
-    try:
-        subprocess.run(['git', 'fetch', 'origin', branch], cwd=BASE_DIR,
-                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30, check=True)
-
-        local_sha  = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=BASE_DIR,
-                                     capture_output=True, text=True, encoding='utf-8', errors='replace', check=True).stdout.strip()
-        remote_sha = subprocess.run(['git', 'rev-parse', f'origin/{branch}'], cwd=BASE_DIR,
-                                     capture_output=True, text=True, encoding='utf-8', errors='replace', check=True).stdout.strip()
-    except Exception as e:
-        logger.warning(f"Auto-update (git): could not reach GitHub ({e}). Skipping.")
-        return False
-
-    if local_sha == remote_sha:
-        logger.info("Auto-update (git): already up to date.")
-        return False
-
-    logger.info(f"Auto-update (git): new commit found ({remote_sha[:7]}). Updating...")
-    try:
-        # Stash any local edits (there shouldn't be any tracked-file edits,
-        # but this protects against a dirty working tree blocking the pull)
-        subprocess.run(['git', 'stash', '--include-untracked'], cwd=BASE_DIR,
-                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
-
-        subprocess.run(['git', 'reset', '--hard', f'origin/{branch}'], cwd=BASE_DIR,
-                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30, check=True)
-
-        _clear_pycache()
-        logger.info(f"Auto-update (git): complete. Now at commit {remote_sha[:7]}. Restarting...")
-        return True
-    except Exception as e:
-        logger.error(f"Auto-update (git) failed: {e}.")
-        return False
-
-# Fallback file list — used ONLY when git is unavailable on the machine.
-# Keep in sync with files that matter for the app to run correctly.
-URL_FALLBACK_FILES = [
-    'app.py',
-    'requirements.txt',
-    'launch.vbs',
-    'generate_data.py',
-    'static/style.css',
-    'static/app.js',
-    'templates/index.html',
-]
-URL_FALLBACK_REPO   = 'Bsgoncalves822/fam-app'
-URL_FALLBACK_HASHES = os.path.join(BASE_DIR, 'data', 'update_hashes.json')
-
-def _load_hashes():
-    if os.path.exists(URL_FALLBACK_HASHES):
-        try:
-            with open(URL_FALLBACK_HASHES, encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-def _save_hashes(hashes):
-    with open(URL_FALLBACK_HASHES, 'w', encoding='utf-8') as f:
-        json.dump(hashes, f, indent=2)
-
-def _update_via_url(branch):
-    """Fallback updater for machines without git: fetches each tracked file
-    from raw.githubusercontent.com (cache-busted), compares MD5, overwrites
-    if changed."""
-    import hashlib
-    repo = URL_FALLBACK_REPO
-    old_hashes = _load_hashes()
-    new_hashes = dict(old_hashes)
-    changed = []
-
-    for relpath in URL_FALLBACK_FILES:
-        url = f"https://raw.githubusercontent.com/{repo}/{branch}/{relpath}?v={int(time.time())}"
-        try:
-            r = requests.get(url, timeout=15)
-            if r.status_code != 200:
-                logger.warning(f"Auto-update (url): could not fetch {relpath} (HTTP {r.status_code}). Skipping.")
-                continue
-            content = r.content
-        except Exception as e:
-            logger.warning(f"Auto-update (url): could not fetch {relpath} ({e}). Skipping.")
-            continue
-
-        digest = hashlib.md5(content).hexdigest()
-        if old_hashes.get(relpath) == digest:
-            continue  # unchanged since last check
-
-        local_path = os.path.join(BASE_DIR, relpath)
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-
-        # Compare against what's actually on disk too, in case hashes.json is stale
-        if os.path.exists(local_path):
-            with open(local_path, 'rb') as f:
-                if hashlib.md5(f.read()).hexdigest() == digest:
-                    new_hashes[relpath] = digest
-                    continue
-
-        with open(local_path, 'wb') as f:
-            f.write(content)
-        new_hashes[relpath] = digest
-        changed.append(relpath)
-        logger.info(f"Auto-update (url): updated {relpath}")
-
-    _save_hashes(new_hashes)
-
-    if changed:
-        _clear_pycache()
-        logger.info(f"Auto-update (url): {len(changed)} file(s) updated. Restarting...")
-        return True
-
-    logger.info("Auto-update (url): already up to date.")
-    return False
-
-def check_for_updates():
-    cfg = load_config()
-    if not cfg.get('auto_update_enabled'):
-        return False
-
-    branch = cfg.get('github_branch', 'main')
-
-    if _git_available():
-        result = _update_via_git(branch)
-        if result is not None:
-            return result
-        logger.info("Auto-update: not a git checkout, falling back to direct file download.")
-    else:
-        logger.info("Auto-update: git not available, using direct file download.")
-
-    return _update_via_url(branch)
-
+# ---------------------------------------------------------------------------
+# ENTRY POINT
+# ---------------------------------------------------------------------------
 if __name__ == '__main__':
-    logger.info(f"Encoding: stdout={sys.stdout.encoding}, filesystem={sys.getfilesystemencoding()}, locale_default={sys.getdefaultencoding()}")
+    try_self_update()
     init_db()
     migrate_csvs_to_db()
-
-    if check_for_updates():
-        python = sys.executable
-        os.execv(python, [python] + sys.argv)
-
     cfg = load_config()
     logger.info(f"FAM App starting on port {cfg['port']}")
     app.run(host='0.0.0.0', port=cfg['port'], debug=False)
-
-
