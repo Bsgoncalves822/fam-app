@@ -1,14 +1,10 @@
-import os, re, uuid, threading, zipfile, io, time, requests, logging, json, sqlite3, sys, hashlib
-import pandas as pd
-import pdfplumber
-from datetime import timedelta, datetime
+import os, re, uuid, threading, zipfile, io, time, requests, logging, json, sys, hashlib
+from datetime import datetime
 from flask import Flask, request, jsonify, send_file, render_template
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.datavalidation import DataValidation
 
-# --- stdout/stderr encoding (Windows safe) ---
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 if hasattr(sys.stderr, 'reconfigure'):
@@ -19,9 +15,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # ---------------------------------------------------------------------------
 # SELF-UPDATE
 # ---------------------------------------------------------------------------
-UPDATE_URL  = "https://raw.githubusercontent.com/Bsgoncalves822/fam-app/main/app.py"
-HASH_FILE   = os.path.join(BASE_DIR, 'data', 'update_hashes.json')
-BRANCH      = "main"
+UPDATE_URL = "https://raw.githubusercontent.com/Bsgoncalves822/fam-app/main/app.py"
+HASH_FILE  = os.path.join(BASE_DIR, 'data', 'update_hashes.json')
+BRANCH     = "main"
 
 def _md5(path):
     h = hashlib.md5()
@@ -32,108 +28,55 @@ def _md5(path):
 
 def _load_hashes():
     try:
-        with open(HASH_FILE) as f:
-            return json.load(f)
-    except Exception:
-        return {}
+        with open(HASH_FILE) as f: return json.load(f)
+    except Exception: return {}
 
 def _save_hashes(d):
     os.makedirs(os.path.dirname(HASH_FILE), exist_ok=True)
-    with open(HASH_FILE, 'w') as f:
-        json.dump(d, f)
+    with open(HASH_FILE, 'w') as f: json.dump(d, f)
 
 def try_self_update():
-    """
-    1. Try git fetch + reset (preferred — updates ALL files).
-    2. Fall back to URL-fetch of app.py only.
-    Restarts process via os.execv if anything changed.
-    """
-    # --- attempt git ---
     try:
         import subprocess
-        result = subprocess.run(
-            ['git', 'fetch', '--quiet', 'origin', BRANCH],
-            cwd=BASE_DIR, capture_output=True, timeout=15
-        )
+        result = subprocess.run(['git', 'fetch', '--quiet', 'origin', BRANCH],
+                                cwd=BASE_DIR, capture_output=True, timeout=15)
         if result.returncode == 0:
-            # Check if remote is ahead
-            diff = subprocess.run(
-                ['git', 'diff', '--name-only', f'HEAD..origin/{BRANCH}'],
-                cwd=BASE_DIR, capture_output=True, text=True, timeout=10,
-                encoding='utf-8', errors='replace'
-            )
-            changed_files = [l.strip() for l in diff.stdout.splitlines() if l.strip()]
-            if changed_files:
-                print(f"[UPDATE] Git: {len(changed_files)} arquivo(s) atualizado(s): {', '.join(changed_files)}")
-                subprocess.run(
-                    ['git', 'reset', '--hard', f'origin/{BRANCH}'],
-                    cwd=BASE_DIR, capture_output=True, timeout=30
-                )
-                # Clear pycache
+            diff = subprocess.run(['git', 'diff', '--name-only', f'HEAD..origin/{BRANCH}'],
+                                  cwd=BASE_DIR, capture_output=True, text=True, timeout=10,
+                                  encoding='utf-8', errors='replace')
+            changed = [l.strip() for l in diff.stdout.splitlines() if l.strip()]
+            if changed:
+                print(f"[UPDATE] Git: {len(changed)} arquivo(s) atualizado(s): {', '.join(changed)}")
+                subprocess.run(['git', 'reset', '--hard', f'origin/{BRANCH}'],
+                               cwd=BASE_DIR, capture_output=True, timeout=30)
+                import shutil
                 pycache = os.path.join(BASE_DIR, '__pycache__')
-                if os.path.isdir(pycache):
-                    import shutil
-                    shutil.rmtree(pycache, ignore_errors=True)
+                if os.path.isdir(pycache): shutil.rmtree(pycache, ignore_errors=True)
                 print("[UPDATE] Reiniciando app...")
                 os.execv(sys.executable, [sys.executable] + sys.argv)
             else:
                 print("[UPDATE] Git: ja esta na versao mais recente.")
-            return  # git worked, no need for URL fallback
+            return
     except Exception as e:
         print(f"[UPDATE] Git indisponivel ({e}), tentando URL fallback...")
-
-    # --- URL fallback: app.py only ---
     try:
         hashes = _load_hashes()
         resp = requests.get(UPDATE_URL + f"?cb={int(time.time())}", timeout=10)
-        if resp.status_code != 200:
-            print(f"[UPDATE] URL fallback: HTTP {resp.status_code}, pulando.")
-            return
+        if resp.status_code != 200: return
         remote_content = resp.content
         remote_hash = hashlib.md5(remote_content).hexdigest()
         local_hash  = _md5(__file__) if os.path.exists(__file__) else ''
-        stored_hash = hashes.get('app.py', '')
-
-        if remote_hash != local_hash and remote_hash != stored_hash:
-            print(f"[UPDATE] Nova versao detectada via URL, aplicando...")
-            with open(__file__, 'wb') as f:
-                f.write(remote_content)
+        if remote_hash != local_hash and remote_hash != hashes.get('app.py', ''):
+            with open(__file__, 'wb') as f: f.write(remote_content)
             hashes['app.py'] = remote_hash
             _save_hashes(hashes)
+            import shutil
             pycache = os.path.join(BASE_DIR, '__pycache__')
-            if os.path.isdir(pycache):
-                import shutil
-                shutil.rmtree(pycache, ignore_errors=True)
+            if os.path.isdir(pycache): shutil.rmtree(pycache, ignore_errors=True)
             print("[UPDATE] Reiniciando app...")
             os.execv(sys.executable, [sys.executable] + sys.argv)
-        else:
-            print("[UPDATE] URL fallback: ja esta na versao mais recente.")
     except Exception as e:
         print(f"[UPDATE] Falha no update ({e}), continuando com versao atual.")
-
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
-def load_config():
-    path = os.path.join(BASE_DIR, 'config.json')
-    defaults = {
-        "codigo_fornecedor": "148",
-        "codigo_folha": "6575",
-        "codigo_nao_identificado": "5",
-        "port": 5002,
-        "comprovante_tolerance_days": 1,
-        "receita_ws_enabled": True,
-        "receita_ws_rpm": 3
-    }
-    if os.path.exists(path):
-        with open(path) as f:
-            data = json.load(f)
-        defaults.update(data)
-    return defaults
-
-def save_config(cfg):
-    with open(os.path.join(BASE_DIR, 'config.json'), 'w') as f:
-        json.dump(cfg, f, indent=4)
 
 # ---------------------------------------------------------------------------
 # LOGGING
@@ -144,577 +87,287 @@ log_file = os.path.join(LOG_DIR, datetime.now().strftime('%Y-%m-%d') + '.log')
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler(log_file, encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler(log_file, encoding='utf-8'), logging.StreamHandler()]
 )
 logger = logging.getLogger('fam')
 
 # ---------------------------------------------------------------------------
-# FLASK APP
+# FLASK
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
 app.config['OUTPUT_FOLDER'] = os.path.join(BASE_DIR, 'outputs')
-app.config['DATA_FOLDER']   = os.path.join(BASE_DIR, 'data')
-
-for folder in [app.config['UPLOAD_FOLDER'], app.config['OUTPUT_FOLDER'], app.config['DATA_FOLDER']]:
-    os.makedirs(folder, exist_ok=True)
+for d in [app.config['UPLOAD_FOLDER'], app.config['OUTPUT_FOLDER'],
+          os.path.join(BASE_DIR, 'data')]:
+    os.makedirs(d, exist_ok=True)
 
 tasks = {}
-DB_PATH = os.path.join(BASE_DIR, 'data', 'fam.db')
-
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def init_db():
-    with get_db() as conn:
-        conn.executescript('''
-            CREATE TABLE IF NOT EXISTS fornecedores (
-                cnpj TEXT PRIMARY KEY,
-                nome TEXT NOT NULL,
-                source TEXT DEFAULT 'CADASTRO',
-                confirmed INTEGER DEFAULT 1,
-                created_at TEXT DEFAULT (datetime('now'))
-            );
-            CREATE TABLE IF NOT EXISTS funcionarios (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nome TEXT UNIQUE NOT NULL,
-                confirmed INTEGER DEFAULT 1
-            );
-            CREATE TABLE IF NOT EXISTS cheques (
-                numero TEXT PRIMARY KEY,
-                portador TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS cnpj_cache (
-                cnpj TEXT PRIMARY KEY,
-                nome TEXT,
-                looked_up_at TEXT DEFAULT (datetime('now'))
-            );
-            CREATE TABLE IF NOT EXISTS run_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_date TEXT DEFAULT (datetime('now')),
-                total_rows INTEGER,
-                ok_count INTEGER,
-                revisar_count INTEGER,
-                nao_encontrado_count INTEGER,
-                novos_fornecedores INTEGER
-            );
-            CREATE TABLE IF NOT EXISTS corrections (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                complemento_text TEXT,
-                cnpj_identified TEXT,
-                correct_participant TEXT,
-                correct_codigo TEXT,
-                corrected_at TEXT DEFAULT (datetime('now'))
-            );
-        ''')
-    logger.info("DB initialized")
-
-def migrate_csvs_to_db():
-    data_dir = app.config['DATA_FOLDER']
-    with get_db() as conn:
-        forn_path = os.path.join(data_dir, 'fornecedores.csv')
-        if os.path.exists(forn_path):
-            df = pd.read_csv(forn_path, dtype=str).fillna('')
-            count = 0
-            for _, row in df.iterrows():
-                cnpj = re.sub(r'[^\d]', '', row.get('CNPJ', ''))
-                nome = row.get('NOME', '').strip()
-                if cnpj and nome:
-                    conn.execute('INSERT OR IGNORE INTO fornecedores (cnpj, nome, source) VALUES (?,?,?)', (cnpj, nome, 'CADASTRO'))
-                    count += 1
-            logger.info(f"Migrated {count} fornecedores")
-        func_path = os.path.join(data_dir, 'funcionarios.csv')
-        if os.path.exists(func_path):
-            df = pd.read_csv(func_path, dtype=str).fillna('')
-            count = 0
-            for _, row in df.iterrows():
-                nome = row.get('NOME', '').strip()
-                if nome:
-                    conn.execute('INSERT OR IGNORE INTO funcionarios (nome) VALUES (?)', (nome,))
-                    count += 1
-            logger.info(f"Migrated {count} funcionarios")
-        cheq_path = os.path.join(data_dir, 'cheques.csv')
-        if os.path.exists(cheq_path):
-            df = pd.read_csv(cheq_path, dtype=str).fillna('')
-            count = 0
-            for _, row in df.iterrows():
-                num = row.get('Numero', '').strip()
-                por = row.get('Portador', '').strip()
-                if num and por:
-                    conn.execute('INSERT OR IGNORE INTO cheques (numero, portador) VALUES (?,?)', (num, por))
-                    count += 1
-            logger.info(f"Migrated {count} cheques")
-
-def build_maps():
-    with get_db() as conn:
-        forn_rows  = conn.execute('SELECT cnpj, nome FROM fornecedores WHERE confirmed=1').fetchall()
-        func_rows  = conn.execute('SELECT nome FROM funcionarios WHERE confirmed=1').fetchall()
-        cheq_rows  = conn.execute('SELECT numero, portador FROM cheques').fetchall()
-        cache_rows = conn.execute('SELECT cnpj, nome FROM cnpj_cache').fetchall()
-    forn_map    = {row['cnpj']: row['nome'] for row in forn_rows}
-    func_names  = [row['nome'].upper() for row in func_rows]
-    cheques_map = {row['numero']: row['portador'] for row in cheq_rows}
-    cnpj_cache  = {row['cnpj']: row['nome'] for row in cache_rows}
-    return forn_map, func_names, cheques_map, cnpj_cache
 
 # ---------------------------------------------------------------------------
-# CSV ENCODING HELPER
+# FILENAME PARSER  (ported from parse_fam_all_months.py)
 # ---------------------------------------------------------------------------
-def read_csv_any_encoding(path, sep=';'):
-    """Try encodings in order until one parses without errors."""
-    for enc in ('utf-8-sig', 'utf-8', 'cp1252', 'latin-1'):
+def fix_year(y):
+    y = y[:4]
+    if y.startswith('200') and int(y) > 2030: y = '20' + y[2:]
+    return y
+
+def parse_amount(raw):
+    if raw is None: return None
+    raw = str(raw).strip()
+    is_negative = raw.startswith('-')
+    raw = raw.lstrip('-').strip()
+    raw = re.sub(r'[^\d,.]', '', raw)
+    raw = re.sub(r'L$', '', raw)
+    raw = re.sub(r'\.(?=\d{3},)', '', raw)
+    raw = re.sub(r'(\d)\s+(\d)', r'\1\2', raw)
+    if ',' in raw:
+        parts = raw.rsplit(',', 1)
+        integer_part = parts[0].replace('.', '').replace(',', '')
+        decimal_part = parts[1]
         try:
-            df = pd.read_csv(path, sep=sep, encoding=enc, dtype=str, on_bad_lines='warn')
-            logger.info(f"CSV lido com encoding={enc}")
-            return df
-        except Exception:
-            continue
-    raise ValueError(f"Nao foi possivel ler o arquivo CSV: {path}")
-
-# ---------------------------------------------------------------------------
-# ETL HELPERS
-# ---------------------------------------------------------------------------
-CNPJ_RE = re.compile(r'\b(\d{2}[\.\-]?\d{3}[\.\-]?\d{3}[\/]?\d{4}[\-]?\d{2}|\d{14})\b')
-CPF_RE  = re.compile(r'\b\d{3}[\.\-]?\d{3}[\.\-]?\d{3}[\-]?\d{2}\b')
-
-FAM_CNPJ = '04957294000103'  # FAM Metal — exclude from CNPJ lookups
-
-def clean_cnpj(raw): return re.sub(r'[^\d]', '', raw)
-
-def extract_cnpj(text):
-    text = str(text)
-    for m in CNPJ_RE.finditer(text):
-        c = clean_cnpj(m.group())
-        if c == FAM_CNPJ:
-            continue
-        return c
-    m = re.search(r'(?<!\d)(\d{14})(?!\d)', text)
-    if m:
-        digits = m.group(1)
-        if digits[:2] != '00' and digits != FAM_CNPJ:
-            return digits
+            val = float(f"{integer_part}.{decimal_part}")
+            return -val if is_negative else val
+        except:
+            return None
     return None
 
-def extract_cpf(text):
-    m = CPF_RE.search(str(text))
-    return re.sub(r'[^\d]', '', m.group()) if m else None
-
-def parse_valor(v):
-    if not v: return 0.0
-    v = str(v).strip().replace('.', '').replace(',', '.')
-    try: return round(abs(float(v)), 2)
-    except: return 0.0
-
-def parse_date(d_str):
-    try: return datetime.strptime(str(d_str).strip(), '%d/%m/%Y')
-    except: return None
-
-def extract_pix_name(complemento):
-    if not complemento: return None
-    m = re.search(
-        r'(?:PAGAMENTO\s+)?PIX\s+(?:\w+\s+)?[\d.\/\-]+\s+(.+?)(?:\s+-\s*(?:PIX_|CX|I00).*)?$',
-        str(complemento).strip(), re.IGNORECASE
+def preprocess(name):
+    name = re.sub(r'^[a-zA-Z]+(?=\d{1,2}[-.\s]\d{2}[-.\s])', '', name)
+    name = re.sub(r'\s*\(VENC[^)]*\)\s*$', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\s*\(\d+\)\s*$', '', name)
+    name = re.sub(
+        r'^(\d{1,2}[-.]?\d{2}[-.]?)(\d{1})([A-Z])',
+        lambda m: m.group(1) + '2025 ' + m.group(3), name
     )
-    return m.group(1).strip().rstrip('- ').upper() if m else None
+    return name
 
-def match_employee_name(pix_name, folha_names):
-    pix_words = list(pix_name.upper().split())
-    pix_set   = set(pix_words)
-    for emp in folha_names:
-        emp_words = list(emp.upper().split())
-        emp_set   = set(emp_words)
-        if len(pix_set & emp_set) >= 2: return True, pix_name[:40]
-        if len(pix_words) >= 2 and len(emp_words) >= 2:
-            if pix_words[0] == emp_words[0] and pix_words[-1] == emp_words[-1]:
-                return True, pix_name[:40]
-    return False, None
+def parse_filename(filename):
+    name = re.sub(r'\.pdf$', '', filename, flags=re.IGNORECASE).strip()
+    if re.match(r'^sicredi_[A-Za-z0-9]', name, re.IGNORECASE):
+        return None, None, None, None, filename, "padrão hash — sem data"
+    name = preprocess(name)
+    date_m = re.match(r'^(\d{1,2})[\s.\-]+(\d{2})[\s.\-+]+(\d{4,5})[\s.\-]*\s*', name)
+    if not date_m:
+        return None, None, None, None, filename, "data não encontrada"
+    day   = date_m.group(1).zfill(2)
+    month = date_m.group(2)
+    year  = fix_year(date_m.group(3))
+    date_str  = f"{day}/{month}/{year}"
+    remainder = name[date_m.end():].strip()
+    remainder = re.sub(r'^[-–\s]+', '', remainder).strip()
 
-def extract_cheque_number(complemento):
-    if not complemento: return None
-    m = re.search(r'ALW0*(\d{4,})', str(complemento))
-    if m: return m.group(1).lstrip('0') or '0'
-    m = re.search(r'(\d{4})\s*$', str(complemento))
-    return m.group(1) if m else None
+    amount_m = re.search(r'[-–]\s*(-?[\d.,]+,\d{2,})\s*$', remainder)
+    if amount_m:
+        amount = parse_amount(amount_m.group(1))
+        body   = remainder[:amount_m.start()].strip().rstrip('-–').strip()
+    else:
+        fallback_m = re.search(r'([\d.]+,\d{2,})\s*$', remainder)
+        if fallback_m:
+            amount = parse_amount(fallback_m.group(1))
+            body   = remainder[:fallback_m.start()].strip().rstrip('.-– ').strip()
+        else:
+            amount = None
+            body   = remainder.strip()
 
-def extract_fallback_name(text):
-    if not text: return None
-    s = str(text).strip()
-    patterns = [
-        r'Pagamento\s+de\s+Boleto\s+([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*(?:-\s*[\d\.]+.*)?$',
-        r'LIQUIDACAO\s+BOLETO(?:\s+\w+)?\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-        r'PAG(?:AMENTO)?\s+(?:DE\s+)?BOLETO(?:\s+\w+)?\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-        r'PAGTO\s+BOLETO\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-        r'DEBITO\s+TED[\w\/]*\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-        r'TED\s+PARA\s+[\d\.\/\-]*\s*([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-        r'Transfer\u00eancia\s+enviada\s+[\w\s]+?\s+-\s+[\d\.]+\s+([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-        r'PAGAMENTO\s+PIX(?:\s+\w+)?\s+[\d\.\/\-]+\s+([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s\.&]{3,50}?)\s*-',
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, s, re.IGNORECASE)
-        if m:
-            name = m.group(1).strip().rstrip('- ')
-            if len(name) >= 4:
-                return name.upper()
-    return None
+    paren_m = re.search(r'\(\s*([^)]+?)\s*\)\s*$', body)
+    if paren_m:
+        payment = paren_m.group(1).strip()
+        supplier = body[:paren_m.start()].strip().rstrip('-–').strip()
+    else:
+        pay_kw = re.search(r'\b(PIX\s+\w+|BOLETO|TED|DOC|CHEQUE|DEBITO|CREDITO|SICREDI|BANCO\s+\w+)\b',
+                           body, re.IGNORECASE)
+        if pay_kw:
+            payment  = pay_kw.group(1).strip()
+            supplier = (body[:pay_kw.start()] + body[pay_kw.end():]).strip().rstrip('-–').strip()
+        else:
+            payment  = None
+            supplier = body.strip().lstrip('-–').strip()
 
-def extract_cnpj_from_pdf(filename, zip_path):
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zf: data = zf.read(filename)
-        with pdfplumber.open(io.BytesIO(data)) as pdf:
-            text = '\n'.join(p.extract_text() or '' for p in pdf.pages[:2])
-        return extract_cnpj(text)
-    except: return None
+    flag = None
+    if amount is None: flag = "valor não encontrado"
+    return date_str, supplier, payment, amount, filename, flag
 
-def parse_filename(fname):
-    dt, amt = None, None
-    d_match = re.search(r'(\d{2}[-_\/]?\d{2}[-_\/]?\d{4}|\d{8})', fname)
-    if d_match:
-        d_str = d_match.group(1).replace('_','').replace('-','').replace('/','')
-        try: dt = datetime.strptime(d_str, '%d%m%Y')
-        except: pass
-    a_match = re.search(r'(\d{1,3}[.,]\d{2})\b', fname)
-    if a_match:
-        try: amt = float(a_match.group(1).replace('.','').replace(',','.'))
-        except: pass
-    return dt, amt
+# ---------------------------------------------------------------------------
+# EXCEL BUILDER
+# ---------------------------------------------------------------------------
+ACCENT  = "00D4FF"
+GREEN   = "00E676"
+SURFACE = "141720"
+BG      = "0D0F12"
+BORDER  = "252A38"
 
-def build_comprovante_lookup(zip_path, tolerance_days):
-    lookup = {}
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        for info in zf.infolist():
-            fname = os.path.basename(info.filename)
-            if not fname.lower().endswith('.pdf'): continue
-            dt, amt = parse_filename(fname)
-            if dt and amt:
-                for delta in range(-tolerance_days, tolerance_days + 1):
-                    key = (dt.date() + timedelta(days=delta), round(abs(amt), 2))
-                    lookup.setdefault(key, []).append({'filename': info.filename, 'delta': delta})
-    return lookup
+def hex_fill(hex_color): return PatternFill("solid", fgColor=hex_color)
 
-def lookup_comprovante(date_obj, valor, lookup):
-    if not date_obj: return None
-    key = (date_obj.date(), round(valor, 2))
-    results = lookup.get(key, [])
-    if not results: return None
-    results.sort(key=lambda x: abs(x['delta']))
-    return results[0]
-
-def batch_lookup_cnpjs(unknown_cnpjs, task_id, cnpj_cache):
-    cfg = load_config()
-    if not cfg.get('receita_ws_enabled', True):
-        return cnpj_cache
-    to_fetch = [c for c in unknown_cnpjs if c not in cnpj_cache and len(c) == 14]
-    if not to_fetch:
-        return cnpj_cache
-    rpm   = cfg.get('receita_ws_rpm', 3)
-    delay = 60.0 / rpm
-    total = len(to_fetch)
-    found = 0
-    tasks[task_id]['log'].append(f"Consultando ReceitaWS: {total} CNPJs desconhecidos...")
-    with get_db() as conn:
-        for i, cnpj in enumerate(to_fetch):
-            try:
-                r = requests.get(f"https://receitaws.com.br/v1/cnpj/{cnpj}", timeout=6)
-                if r.status_code == 200:
-                    data = r.json()
-                    if data.get('status') != 'ERROR':
-                        nome = data.get('nome', '').strip()
-                        cnpj_cache[cnpj] = nome
-                        conn.execute('INSERT OR REPLACE INTO cnpj_cache (cnpj, nome) VALUES (?,?)', (cnpj, nome))
-                        found += 1
-                    else:
-                        cnpj_cache[cnpj] = None
-                        conn.execute('INSERT OR REPLACE INTO cnpj_cache (cnpj, nome) VALUES (?,NULL)', (cnpj,))
-                elif r.status_code == 429:
-                    tasks[task_id]['log'].append(f"ReceitaWS: limite atingido em {i+1}/{total}. Aguardando...")
-                    time.sleep(20)
-            except:
-                cnpj_cache[cnpj] = None
-            if (i + 1) % 3 == 0 or i == total - 1:
-                tasks[task_id]['log'].append(f"ReceitaWS: {i+1}/{total} consultados, {found} encontrados.")
-            time.sleep(delay)
-    return cnpj_cache
-
-def build_excel(results, new_fornecedores, out_path, cfg):
+def build_excel(rows_by_month, out_path):
     wb = Workbook()
-    ws = wb.active
-    ws.title = "RESULTADO"
-    cols = [
-        ('Data', 12), ('Historico', 20), ('Complemento', 45), ('Valor', 12),
-        ('Debito', 15), ('Credito', 15), ('CODIGO', 10), ('PARTICIPANTE', 35),
-        ('CNPJ_IDENTIFICADO', 20), ('FOLHA', 8), ('CHEQUE_NUM', 12),
-        ('COMPROVANTE', 35), ('STATUS', 14), ('ORIGEM', 14), ('CONFIRMAR', 14),
-    ]
-    col_keys = ['Data', 'Historico', 'Complemento', 'Valor', 'Debito', 'Credito',
-                'CODIGO', 'PARTICIPANTE', 'CNPJ_IDENTIFICADO', 'FOLHA', 'CHEQUE_NUM',
-                'COMPROVANTE', 'STATUS', 'ORIGEM', 'CONFIRMAR']
-    header_fill   = PatternFill(start_color="0D0F12", end_color="0D0F12", fill_type="solid")
-    header_font   = Font(bold=True, color="00D4FF", size=10)
-    header_border = Border(bottom=Side(style='thin', color="00D4FF"))
-    for i, (col, width) in enumerate(cols, 1):
-        cell = ws.cell(row=1, column=i, value=col)
-        cell.font      = header_font
-        cell.fill      = header_fill
-        cell.alignment = Alignment(horizontal='center', vertical='center')
-        cell.border    = header_border
-        ws.column_dimensions[get_column_letter(i)].width = width
-    ws.row_dimensions[1].height = 22
-    ws.freeze_panes = 'A2'
-    code_opts = '"' + cfg['codigo_fornecedor'] + ',' + cfg['codigo_folha'] + ',' + cfg['codigo_nao_identificado'] + '"'
-    for dv_def, col_letter in [
-        (DataValidation(type="list", formula1=code_opts, allow_blank=True, showDropDown=False), 'G'),
-        (DataValidation(type="list", formula1='"OK,REVISAR,NAO ENCONTRADO"', allow_blank=True, showDropDown=False), 'M'),
-        (DataValidation(type="list", formula1='"SIM,REVISAR,NAO"', allow_blank=True, showDropDown=False), 'O'),
-    ]:
-        dv_def.sqref = f"{col_letter}2:{col_letter}{len(results)+1}"
-        ws.add_data_validation(dv_def)
-    green_fill  = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-    yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
-    red_fill    = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    blue_fill   = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
-    for r in results:
-        ws.append([r.get(k, '') for k in col_keys])
-        if r['STATUS'] == 'OK':           fill = green_fill
-        elif r['STATUS'] == 'REVISAR':    fill = blue_fill if r.get('ORIGEM') == 'RECEITA_WS' else yellow_fill
-        else:                             fill = red_fill
-        for cell in ws[ws.max_row]:
-            cell.fill      = fill
-            cell.alignment = Alignment(vertical='center')
-    if new_fornecedores:
-        ws2 = wb.create_sheet("NOVOS FORNECEDORES")
-        ws2.append(['CNPJ', 'NOME (ReceitaWS)', 'ADICIONAR AO CADASTRO?'])
-        for cell in ws2[1]:
-            cell.font  = Font(bold=True, color="00D4FF")
-            cell.fill  = PatternFill(start_color="0D0F12", end_color="0D0F12", fill_type="solid")
-            cell.alignment = Alignment(horizontal='center')
-        dv2 = DataValidation(type="list", formula1='"SIM,NAO"', allow_blank=False, showDropDown=False)
-        dv2.sqref = f"C2:C{len(new_fornecedores)+1}"
-        ws2.add_data_validation(dv2)
-        for cnpj, nome in new_fornecedores.items():
-            ws2.append([cnpj, nome, 'SIM'])
-        ws2.column_dimensions['A'].width = 20
-        ws2.column_dimensions['B'].width = 55
-        ws2.column_dimensions['C'].width = 22
+    wb.remove(wb.active)
+
+    header_cols = ["Data", "Fornecedor / Descrição", "Forma de Pagamento", "Valor (R$)", "Arquivo"]
+    col_widths   = [14, 52, 22, 16, 60]
+
+    all_rows = []
+    for month_label in sorted(rows_by_month.keys()):
+        rows = rows_by_month[month_label]
+        ws = wb.create_sheet(title=month_label)
+        ws.sheet_view.showGridLines = False
+
+        # Title row
+        ws.merge_cells(f"A1:{get_column_letter(len(header_cols))}1")
+        title_cell = ws["A1"]
+        title_cell.value = f"FAM — Comprovantes · {month_label}"
+        title_cell.font = Font(name="Arial", bold=True, size=13, color=ACCENT)
+        title_cell.fill = hex_fill(BG)
+        title_cell.alignment = Alignment(horizontal="left", vertical="center")
+        ws.row_dimensions[1].height = 32
+
+        # Header row
+        for ci, (hdr, w) in enumerate(zip(header_cols, col_widths), 1):
+            cell = ws.cell(row=2, column=ci, value=hdr)
+            cell.font      = Font(name="Arial", bold=True, size=9, color=ACCENT)
+            cell.fill      = hex_fill(SURFACE)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            ws.column_dimensions[get_column_letter(ci)].width = w
+        ws.row_dimensions[2].height = 20
+
+        thin = Side(style="thin", color=BORDER)
+        border = Border(bottom=Side(style="thin", color="1C2030"))
+
+        total = 0.0
+        for ri, row in enumerate(rows, 3):
+            date, supplier, payment, amount, fname, flag = row
+            row_fill = hex_fill("0A0C10") if ri % 2 == 0 else hex_fill(BG)
+            values = [date or "", supplier or fname, payment or "", amount or "", fname]
+            for ci, val in enumerate(values, 1):
+                cell = ws.cell(row=ri, column=ci, value=val)
+                cell.fill      = row_fill
+                cell.alignment = Alignment(vertical="center")
+                cell.border    = border
+                if ci == 4:
+                    cell.number_format = '#.##0,00'
+                    cell.font = Font(name="Arial", size=9,
+                                     color="FF5252" if flag else "E8ECF4")
+                else:
+                    cell.font = Font(name="Arial", size=9,
+                                     color="6B7599" if flag else "E8ECF4")
+            ws.row_dimensions[ri].height = 16
+            if amount: total += amount
+            all_rows.append(row)
+
+        # Total row
+        tr = len(rows) + 3
+        ws.merge_cells(f"A{tr}:C{tr}")
+        tot_label = ws[f"A{tr}"]
+        tot_label.value     = "TOTAL"
+        tot_label.font      = Font(name="Arial", bold=True, size=9, color=ACCENT)
+        tot_label.fill      = hex_fill(SURFACE)
+        tot_label.alignment = Alignment(horizontal="right", vertical="center")
+        tot_val = ws.cell(row=tr, column=4, value=total)
+        tot_val.font         = Font(name="Arial", bold=True, size=9, color=GREEN)
+        tot_val.fill         = hex_fill(SURFACE)
+        tot_val.number_format = '#.##0,00'
+        tot_val.alignment    = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[tr].height = 20
+
+    # Summary sheet
+    ws = wb.create_sheet(title="Resumo", index=0)
+    ws.sheet_view.showGridLines = False
+    ws.merge_cells(f"A1:{get_column_letter(len(header_cols))}1")
+    c = ws["A1"]
+    c.value = "FAM — Resumo Consolidado"
+    c.font  = Font(name="Arial", bold=True, size=13, color=ACCENT)
+    c.fill  = hex_fill(BG)
+    c.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[1].height = 32
+
+    for ci, (hdr, w) in enumerate(zip(header_cols, col_widths), 1):
+        cell = ws.cell(row=2, column=ci, value=hdr)
+        cell.font      = Font(name="Arial", bold=True, size=9, color=ACCENT)
+        cell.fill      = hex_fill(SURFACE)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[get_column_letter(ci)].width = w
+    ws.row_dimensions[2].height = 20
+
+    border = Border(bottom=Side(style="thin", color="1C2030"))
+    grand_total = 0.0
+    for ri, row in enumerate(all_rows, 3):
+        date, supplier, payment, amount, fname, flag = row
+        row_fill = hex_fill("0A0C10") if ri % 2 == 0 else hex_fill(BG)
+        values = [date or "", supplier or fname, payment or "", amount or "", fname]
+        for ci, val in enumerate(values, 1):
+            cell = ws.cell(row=ri, column=ci, value=val)
+            cell.fill      = row_fill
+            cell.alignment = Alignment(vertical="center")
+            cell.border    = border
+            if ci == 4:
+                cell.number_format = '#.##0,00'
+                cell.font = Font(name="Arial", size=9,
+                                 color="FF5252" if flag else "E8ECF4")
+            else:
+                cell.font = Font(name="Arial", size=9,
+                                 color="6B7599" if flag else "E8ECF4")
+        ws.row_dimensions[ri].height = 16
+        if amount: grand_total += amount
+
+    tr = len(all_rows) + 3
+    ws.merge_cells(f"A{tr}:C{tr}")
+    tl = ws[f"A{tr}"]
+    tl.value = "TOTAL GERAL"
+    tl.font  = Font(name="Arial", bold=True, size=9, color=ACCENT)
+    tl.fill  = hex_fill(SURFACE)
+    tl.alignment = Alignment(horizontal="right", vertical="center")
+    tv = ws.cell(row=tr, column=4, value=grand_total)
+    tv.font         = Font(name="Arial", bold=True, size=9, color=GREEN)
+    tv.fill         = hex_fill(SURFACE)
+    tv.number_format = '#.##0,00'
+    tv.alignment    = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[tr].height = 20
+
     wb.save(out_path)
 
 # ---------------------------------------------------------------------------
-# MAIN ETL
+# TASK RUNNER
 # ---------------------------------------------------------------------------
-
-# Column schemas for different SCI export formats
-_COLS_12 = ['Transacao','Chave','Lote','Data','Debito','Participante a debito',
-            'Credito','Participante a credito','Valor','Historico','Complemento','No Doc.']
-_COLS_7  = ['Data','Debito','Credito','Valor','Historico','Complemento','No Doc.']
-
-def _map_sci_columns(df):
-    """
-    Map raw SCI CSV columns to the standard internal names regardless of
-    which export variant the accountant used (12-col full, 13-col with
-    leading index, or 7-col slim 'Impressão de campos da consulta').
-    Returns df with columns renamed to _COLS_12 or _COLS_7 standard.
-    Raises ValueError if the column count is unrecognised.
-    """
-    ncols = len(df.columns)
-    if ncols == len(_COLS_12) + 1:
-        # 13-col: leading unnamed index column from some SCI exports
-        df = df.iloc[:, 1:]
-        df.columns = _COLS_12
-    elif ncols == len(_COLS_12):
-        df.columns = _COLS_12
-    elif ncols == len(_COLS_7):
-        df.columns = _COLS_7
-    else:
-        # Last resort: try to match by normalised header name
-        norm = {re.sub(r'[^a-z]', '', c.lower()): c for c in df.columns}
-        needed = {'data': 'Data', 'valor': 'Valor', 'historico': 'Historico',
-                  'complemento': 'Complemento', 'debito': 'Debito', 'credito': 'Credito'}
-        rename = {}
-        missing = []
-        for key, target in needed.items():
-            match = next((orig for nk, orig in norm.items() if key in nk), None)
-            if match:
-                rename[match] = target
-            else:
-                missing.append(target)
-        if missing:
-            raise ValueError(
-                f"Formato CSV desconhecido ({ncols} colunas). "
-                f"Colunas obrigatorias nao encontradas: {missing}. "
-                f"Colunas presentes: {list(df.columns)}"
-            )
-        df = df.rename(columns=rename)
-        logger.warning(f"CSV: formato nao padrao ({ncols} cols), mapeado por nome.")
-    return df
-
-def run_fam_etl(task_id, sci_path, zip_path):
-    tasks[task_id]['status'] = 'RUNNING'
-    cfg = load_config()
-    logger.info(f"Run started: task={task_id}")
-
+def run_parse(task_id, zip_path):
     def log(msg):
         tasks[task_id]['log'].append(msg)
         logger.info(msg)
 
     try:
-        forn_map, func_names, cheques_map, cnpj_cache = build_maps()
-        log(f"Dados carregados: {len(forn_map)} fornecedores, {len(func_names)} funcionarios, {len(cheques_map)} cheques, {len(cnpj_cache)} CNPJs em cache.")
+        log("Lendo arquivos do ZIP...")
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            names = [n for n in zf.namelist() if n.lower().endswith('.pdf')]
 
-        log("Lendo SCI Bank CSV...")
-        df_raw = read_csv_any_encoding(sci_path)
-        try:
-            df = _map_sci_columns(df_raw)
-        except ValueError as e:
-            raise ValueError(str(e))
+        log(f"{len(names)} comprovantes encontrados.")
 
-        df.fillna('', inplace=True)
-        df['Valor_Float'] = df['Valor'].apply(parse_valor)
+        rows_by_month = {}
+        flagged = 0
+        for fname in names:
+            basename = os.path.basename(fname)
+            date, supplier, payment, amount, original, flag = parse_filename(basename)
+            if flag: flagged += 1
 
-        # Normalise column names that differ between formats
-        if 'Historico' not in df.columns and 'Hist\u00f3rico' in df.columns:
-            df.rename(columns={'Hist\u00f3rico': 'Historico'}, inplace=True)
-        if 'Complemento' not in df.columns:
-            df['Complemento'] = ''
-
-        log(f"{len(df)} transacoes carregadas.")
-
-        log("Indexando Comprovantes ZIP...")
-        tolerance = cfg.get('comprovante_tolerance_days', 1)
-        comp_lookup = build_comprovante_lookup(zip_path, tolerance)
-        log(f"{len(comp_lookup)} chaves de comprovante indexadas.")
-
-        log("Identificando CNPJs desconhecidos...")
-        unknown_cnpjs = set()
-        for _, row in df.iterrows():
-            cnpj = extract_cnpj(str(row.get('Complemento', '')))
-            if cnpj and len(cnpj) == 14 and cnpj not in forn_map:
-                unknown_cnpjs.add(cnpj)
-        log(f"{len(unknown_cnpjs)} CNPJs desconhecidos encontrados.")
-
-        if cfg.get('receita_ws_enabled', True) and unknown_cnpjs:
-            cnpj_cache = batch_lookup_cnpjs(unknown_cnpjs, task_id, cnpj_cache)
-
-        log("Enriquecendo transacoes...")
-        results = []
-        new_fornecedores = {}
-        CODE_FORN  = cfg['codigo_fornecedor']
-        CODE_FOLHA = cfg['codigo_folha']
-        CODE_NAO   = cfg['codigo_nao_identificado']
-
-        for idx, row in df.iterrows():
-            comp_text = str(row.get('Complemento', ''))
-            hist_text = str(row.get('Historico', ''))
-            res = {
-                'Data': row['Data'], 'Historico': hist_text, 'Complemento': comp_text,
-                'Valor': row['Valor'], 'Debito': row.get('Debito', ''), 'Credito': row.get('Credito', ''),
-                'CODIGO': CODE_NAO, 'PARTICIPANTE': '', 'CNPJ_IDENTIFICADO': '',
-                'FOLHA': '', 'CHEQUE_NUM': '', 'COMPROVANTE': '',
-                'STATUS': 'NAO ENCONTRADO', 'ORIGEM': ''
-            }
-
-            cnpj = extract_cnpj(comp_text)
-            cpf  = extract_cpf(comp_text)
-
-            if cnpj and cnpj in forn_map:
-                res['PARTICIPANTE']      = forn_map[cnpj]
-                res['CNPJ_IDENTIFICADO'] = cnpj
-                res['ORIGEM']            = 'CADASTRO'
-                res['CODIGO']            = CODE_FORN
-            elif cnpj and cnpj in cnpj_cache and cnpj_cache[cnpj]:
-                res['PARTICIPANTE']      = cnpj_cache[cnpj]
-                res['CNPJ_IDENTIFICADO'] = cnpj
-                res['ORIGEM']            = 'RECEITA_WS'
-                res['CODIGO']            = CODE_FORN
-                new_fornecedores[cnpj]   = cnpj_cache[cnpj]
-            elif cnpj:
-                res['CNPJ_IDENTIFICADO'] = cnpj
-                fallback = extract_fallback_name(hist_text) or extract_fallback_name(comp_text)
-                if fallback:
-                    res['PARTICIPANTE'] = '(?) ' + fallback
-                    res['ORIGEM']       = 'COMPLEMENTO'
-                    res['CODIGO']       = CODE_FORN
-            elif cpf:
-                res['CNPJ_IDENTIFICADO'] = 'CPF:' + cpf
-                fallback = extract_fallback_name(hist_text) or extract_fallback_name(comp_text)
-                if fallback:
-                    res['PARTICIPANTE'] = '(?) ' + fallback
-                    res['ORIGEM']       = 'COMPLEMENTO'
-                    res['CODIGO']       = CODE_FORN
+            # Derive month label from parsed date or filename
+            if date:
+                parts = date.split('/')
+                month_label = f"{parts[1]}-{parts[2]}"
             else:
-                fallback = extract_fallback_name(hist_text) or extract_fallback_name(comp_text)
-                if fallback:
-                    res['PARTICIPANTE'] = '(?) ' + fallback
-                    res['ORIGEM']       = 'COMPLEMENTO'
-                    res['CODIGO']       = CODE_FORN
+                # Try to grab month from filename directly
+                m = re.search(r'\d{1,2}[-./]\d{2}[-./](\d{4})', basename)
+                month_label = "Sem Data"
 
-            pix_name = extract_pix_name(comp_text)
-            if pix_name:
-                is_folha, reason = match_employee_name(pix_name, func_names)
-                if is_folha:
-                    res['FOLHA']  = 'SIM'
-                    res['CODIGO'] = CODE_FOLHA
-                    res['ORIGEM'] = 'FOLHA'
-                    if not res['PARTICIPANTE']:
-                        res['PARTICIPANTE'] = reason
+            rows_by_month.setdefault(month_label, []).append(
+                (date, supplier, payment, amount, original, flag)
+            )
 
-            if 'CHEQUE' in hist_text.upper() or 'CHEQUE' in comp_text.upper():
-                ch_num = extract_cheque_number(comp_text)
-                if ch_num and ch_num in cheques_map:
-                    portador = cheques_map[ch_num]
-                    res['CHEQUE_NUM']   = ch_num
-                    res['PARTICIPANTE'] = portador
-                    res['ORIGEM']       = 'CHEQUE'
-                    if any(k in portador.upper() for k in ['SALARIO','FAM METAL']):
-                        res['CODIGO'] = CODE_FOLHA
-                        res['FOLHA']  = 'SIM'
-                    else:
-                        res['CODIGO'] = CODE_FORN
-
-            dt_obj = parse_date(row['Data'])
-            comp_match = lookup_comprovante(dt_obj, row['Valor_Float'], comp_lookup)
-            if comp_match:
-                res['COMPROVANTE'] = comp_match['filename']
-                if not res['PARTICIPANTE']:
-                    pdf_cnpj = extract_cnpj_from_pdf(comp_match['filename'], zip_path)
-                    if pdf_cnpj and pdf_cnpj in forn_map:
-                        res['PARTICIPANTE']      = forn_map[pdf_cnpj]
-                        res['CNPJ_IDENTIFICADO'] = pdf_cnpj
-                        res['ORIGEM']            = 'PDF'
-                        res['CODIGO']            = CODE_FORN
-
-            if res['PARTICIPANTE'] and res['COMPROVANTE']:   res['STATUS'] = 'OK'
-            elif res['PARTICIPANTE'] or res['COMPROVANTE']:  res['STATUS'] = 'REVISAR'
-
-            results.append(res)
-
-        if new_fornecedores:
-            with get_db() as conn:
-                for cnpj, nome in new_fornecedores.items():
-                    conn.execute('INSERT OR IGNORE INTO fornecedores (cnpj, nome, source, confirmed) VALUES (?,?,?,0)',
-                                (cnpj, nome, 'RECEITA_WS'))
-
+        log(f"Parseados: {len(names) - flagged} OK · {flagged} com flag")
         log("Gerando Excel...")
+
         out_path = os.path.join(app.config['OUTPUT_FOLDER'], f"{task_id}.xlsx")
-        build_excel(results, new_fornecedores, out_path, cfg)
-
-        ok_c  = sum(1 for r in results if r['STATUS'] == 'OK')
-        rev_c = sum(1 for r in results if r['STATUS'] == 'REVISAR')
-        nao_c = sum(1 for r in results if r['STATUS'] == 'NAO ENCONTRADO')
-        total = len(results)
-
-        with get_db() as conn:
-            conn.execute('INSERT INTO run_history (total_rows,ok_count,revisar_count,nao_encontrado_count,novos_fornecedores) VALUES (?,?,?,?,?)',
-                        (total, ok_c, rev_c, nao_c, len(new_fornecedores)))
+        build_excel(rows_by_month, out_path)
 
         tasks[task_id]['status'] = 'DONE'
         tasks[task_id]['file']   = out_path
-        log(f"OK: {ok_c} ({ok_c/total*100:.1f}%) | REVISAR: {rev_c} ({rev_c/total*100:.1f}%) | NAO ENCONTRADO: {nao_c} ({nao_c/total*100:.1f}%)")
-        log(f"Novos fornecedores via API: {len(new_fornecedores)}")
-        log("Processamento concluido com sucesso!")
+        log(f"Concluído! {len(names)} comprovantes → Excel pronto.")
 
     except Exception as e:
         import traceback
@@ -724,19 +377,11 @@ def run_fam_etl(task_id, sci_path, zip_path):
         logger.error(f"Run failed: {e}")
 
 # ---------------------------------------------------------------------------
-# FLASK ROUTES
+# ROUTES
 # ---------------------------------------------------------------------------
 @app.route('/')
 def index():
     return render_template('index.html')
-
-@app.route('/upload/sci', methods=['POST'])
-def upload_sci():
-    if 'file' not in request.files: return jsonify({"error": "No file"}), 400
-    f = request.files['file']
-    path = os.path.join(app.config['UPLOAD_FOLDER'], f"sci_{uuid.uuid4().hex}.csv")
-    f.save(path)
-    return jsonify({"path": path})
 
 @app.route('/upload/zip', methods=['POST'])
 def upload_zip():
@@ -749,12 +394,11 @@ def upload_zip():
 @app.route('/processar', methods=['POST'])
 def processar():
     data     = request.json
-    sci_path = data.get('sci_path')
     zip_path = data.get('zip_path')
-    if not sci_path or not zip_path: return jsonify({"error": "Missing files"}), 400
+    if not zip_path: return jsonify({"error": "Missing zip"}), 400
     task_id = uuid.uuid4().hex
     tasks[task_id] = {"status": "PENDING", "log": [], "file": None}
-    threading.Thread(target=run_fam_etl, args=(task_id, sci_path, zip_path)).start()
+    threading.Thread(target=run_parse, args=(task_id, zip_path)).start()
     return jsonify({"task_id": task_id})
 
 @app.route('/status/<task_id>')
@@ -766,88 +410,13 @@ def status(task_id):
 def download(task_id):
     if task_id not in tasks or tasks[task_id]['status'] != 'DONE':
         return jsonify({"error": "Not ready"}), 400
-    return send_file(tasks[task_id]['file'], as_attachment=True, download_name='FAM_Resultado.xlsx')
-
-@app.route('/data/<ref_type>', methods=['GET'])
-def get_data(ref_type):
-    if ref_type not in ['funcionarios', 'fornecedores', 'cheques']:
-        return jsonify({"error": "Invalid"}), 400
-    with get_db() as conn:
-        if ref_type == 'fornecedores':
-            rows = conn.execute('SELECT cnpj as CNPJ, nome as NOME, source, confirmed FROM fornecedores').fetchall()
-        elif ref_type == 'funcionarios':
-            rows = conn.execute('SELECT nome as NOME, confirmed FROM funcionarios').fetchall()
-        else:
-            rows = conn.execute('SELECT numero as Numero, portador as Portador FROM cheques').fetchall()
-    return jsonify([dict(r) for r in rows])
-
-@app.route('/data/<ref_type>', methods=['POST'])
-def update_data(ref_type):
-    if ref_type not in ['funcionarios', 'fornecedores', 'cheques']:
-        return jsonify({"error": "Invalid"}), 400
-    if 'file' not in request.files: return jsonify({"error": "No file"}), 400
-    f = request.files['file']
-    path = os.path.join(app.config['DATA_FOLDER'], f"{ref_type}_upload.csv")
-    f.save(path)
-    df = read_csv_any_encoding(path)
-    df.fillna('', inplace=True)
-    with get_db() as conn:
-        if ref_type == 'fornecedores':
-            for _, row in df.iterrows():
-                cnpj = re.sub(r'[^\d]', '', row.get('CNPJ', ''))
-                nome = row.get('NOME', '').strip()
-                if cnpj and nome:
-                    conn.execute('INSERT OR REPLACE INTO fornecedores (cnpj, nome, source, confirmed) VALUES (?,?,?,1)', (cnpj, nome, 'CADASTRO'))
-        elif ref_type == 'funcionarios':
-            for _, row in df.iterrows():
-                nome = row.get('NOME', '').strip()
-                if nome:
-                    conn.execute('INSERT OR IGNORE INTO funcionarios (nome) VALUES (?)', (nome,))
-        else:
-            for _, row in df.iterrows():
-                num = row.get('Numero', '').strip()
-                por = row.get('Portador', '').strip()
-                if num and por:
-                    conn.execute('INSERT OR REPLACE INTO cheques (numero, portador) VALUES (?,?)', (num, por))
-    return jsonify({"success": True})
-
-@app.route('/config', methods=['GET'])
-def get_config():
-    return jsonify(load_config())
-
-@app.route('/config', methods=['POST'])
-def update_config():
-    data = request.json
-    cfg  = load_config()
-    for k in ['codigo_fornecedor','codigo_folha','codigo_nao_identificado',
-              'comprovante_tolerance_days','receita_ws_enabled','receita_ws_rpm']:
-        if k in data:
-            cfg[k] = data[k]
-    save_config(cfg)
-    return jsonify({"success": True, "config": cfg})
-
-@app.route('/history', methods=['GET'])
-def get_history():
-    with get_db() as conn:
-        rows = conn.execute('SELECT * FROM run_history ORDER BY run_date DESC LIMIT 20').fetchall()
-    return jsonify([dict(r) for r in rows])
-
-@app.route('/confirm_fornecedores', methods=['POST'])
-def confirm_fornecedores():
-    data  = request.json
-    cnpjs = data.get('cnpjs', [])
-    with get_db() as conn:
-        for cnpj in cnpjs:
-            conn.execute('UPDATE fornecedores SET confirmed=1 WHERE cnpj=?', (cnpj,))
-    return jsonify({"success": True, "confirmed": len(cnpjs)})
+    return send_file(tasks[task_id]['file'], as_attachment=True,
+                     download_name='FAM_Comprovantes.xlsx')
 
 # ---------------------------------------------------------------------------
 # ENTRY POINT
 # ---------------------------------------------------------------------------
 if __name__ == '__main__':
     try_self_update()
-    init_db()
-    migrate_csvs_to_db()
-    cfg = load_config()
-    logger.info(f"FAM App starting on port {cfg['port']}")
-    app.run(host='0.0.0.0', port=cfg['port'], debug=False)
+    logger.info("FAM App (ZIP Parser) starting on port 5002")
+    app.run(host='0.0.0.0', port=5002, debug=False)
