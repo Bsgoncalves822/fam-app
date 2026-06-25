@@ -4,6 +4,7 @@ from flask import Flask, request, jsonify, send_file, render_template
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+import pdfplumber
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -22,14 +23,13 @@ BRANCH     = "main"
 def _md5(path):
     h = hashlib.md5()
     with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(65536), b''):
-            h.update(chunk)
+        for chunk in iter(lambda: f.read(65536), b''): h.update(chunk)
     return h.hexdigest()
 
 def _load_hashes():
     try:
         with open(HASH_FILE) as f: return json.load(f)
-    except Exception: return {}
+    except: return {}
 
 def _save_hashes(d):
     os.makedirs(os.path.dirname(HASH_FILE), exist_ok=True)
@@ -46,19 +46,19 @@ def try_self_update():
                                   encoding='utf-8', errors='replace')
             changed = [l.strip() for l in diff.stdout.splitlines() if l.strip()]
             if changed:
-                print(f"[UPDATE] Git: {len(changed)} arquivo(s) atualizado(s): {', '.join(changed)}")
+                print(f"[UPDATE] {len(changed)} file(s) updated: {', '.join(changed)}")
                 subprocess.run(['git', 'reset', '--hard', f'origin/{BRANCH}'],
                                cwd=BASE_DIR, capture_output=True, timeout=30)
                 import shutil
                 pycache = os.path.join(BASE_DIR, '__pycache__')
                 if os.path.isdir(pycache): shutil.rmtree(pycache, ignore_errors=True)
-                print("[UPDATE] Reiniciando app...")
+                print("[UPDATE] Restarting...")
                 os.execv(sys.executable, [sys.executable] + sys.argv)
             else:
-                print("[UPDATE] Git: ja esta na versao mais recente.")
+                print("[UPDATE] Already up to date.")
             return
     except Exception as e:
-        print(f"[UPDATE] Git indisponivel ({e}), tentando URL fallback...")
+        print(f"[UPDATE] Git unavailable ({e}), trying URL fallback...")
     try:
         hashes = _load_hashes()
         resp = requests.get(UPDATE_URL + f"?cb={int(time.time())}", timeout=10)
@@ -73,10 +73,10 @@ def try_self_update():
             import shutil
             pycache = os.path.join(BASE_DIR, '__pycache__')
             if os.path.isdir(pycache): shutil.rmtree(pycache, ignore_errors=True)
-            print("[UPDATE] Reiniciando app...")
+            print("[UPDATE] Restarting...")
             os.execv(sys.executable, [sys.executable] + sys.argv)
     except Exception as e:
-        print(f"[UPDATE] Falha no update ({e}), continuando com versao atual.")
+        print(f"[UPDATE] Update failed ({e}), continuing with current version.")
 
 # ---------------------------------------------------------------------------
 # LOGGING
@@ -104,223 +104,208 @@ for d in [app.config['UPLOAD_FOLDER'], app.config['OUTPUT_FOLDER'],
 tasks = {}
 
 # ---------------------------------------------------------------------------
-# FILENAME PARSER  (ported from parse_fam_all_months.py)
+# PDF EXTRACTION
+# ---------------------------------------------------------------------------
+FAM_CNPJ = '04957294000103'
+
+def clean_cnpj(raw):
+    return re.sub(r'[^\d]', '', str(raw))
+
+def extract_pix(text):
+    rec = {}
+    m = re.search(r'Nome do destinat[aá]rio:\s*(.+)', text, re.IGNORECASE)
+    if m: rec['destinatario_nome'] = m.group(1).strip()
+    m = re.search(r'CNPJ do destinat[aá]rio:\s*([\d.\/\-]+)', text, re.IGNORECASE)
+    if m:
+        cnpj = clean_cnpj(m.group(1))
+        if cnpj != FAM_CNPJ: rec['destinatario_cnpj'] = cnpj
+    m = re.search(r'CPF do destinat[aá]rio:\s*([\*\d.\-]+)', text, re.IGNORECASE)
+    if m: rec['destinatario_cpf'] = m.group(1).strip()
+    m = re.search(r'Institui[cç][aã]o do destinat[aá]rio:\s*(.+)', text, re.IGNORECASE)
+    if m: rec['banco'] = m.group(1).strip()
+    m = re.search(r'Valor:\s*R\$\s*([\d.,]+)', text, re.IGNORECASE)
+    if m: rec['valor'] = m.group(1).strip()
+    m = re.search(r'Realizado em:\s*([\d/]+)', text, re.IGNORECASE)
+    if m: rec['data'] = m.group(1).strip()
+    m = re.search(r'Solicitante:\s*(.+)', text, re.IGNORECASE)
+    if m: rec['solicitante'] = m.group(1).strip()
+    m = re.search(r'ID da transa[cç][aã]o:\s*(\S+)', text, re.IGNORECASE)
+    if m: rec['id_transacao'] = m.group(1).strip()
+    m = re.search(r'N[uú]mero de Controle:\s*(\d+)', text, re.IGNORECASE)
+    if m: rec['num_controle'] = m.group(1).strip()
+    # label like RESCISÃO sitting between header and Valor line
+    m = re.search(r'Comprovante de Pagamento Pix\s*\n([A-ZÁÉÍÓÚÃÕÇ ]{3,})\n', text, re.IGNORECASE)
+    if m:
+        label = m.group(1).strip()
+        if label.upper() not in ('VALOR', 'REALIZADO'):
+            rec['label'] = label
+    rec['tipo'] = 'PIX'
+    return rec
+
+def extract_boleto(text):
+    rec = {}
+    for pat in [r'Raz[aã]o Social do Benefici[aá]rio:\s*(.+)',
+                r'Nome Fantasia do Benefici[aá]rio:\s*(.+)']:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            rec['destinatario_nome'] = m.group(1).strip()
+            break
+    m = re.search(r'CPF/CNPJ do Benefici[aá]rio:\s*([\d.\/\-]+)', text, re.IGNORECASE)
+    if m:
+        cnpj = clean_cnpj(m.group(1))
+        if cnpj != FAM_CNPJ: rec['destinatario_cnpj'] = cnpj
+    m = re.search(r'Institui[cç][aã]o Emissora:\s*(.+)', text, re.IGNORECASE)
+    if m: rec['banco'] = m.group(1).strip()
+    m = re.search(r'Valor do T[ií]tulo \(R\$\):\s*([\d.,]+)', text, re.IGNORECASE)
+    if not m: m = re.search(r'Valor\s*\(R\$\):\s*([\d.,]+)', text, re.IGNORECASE)
+    if m: rec['valor'] = m.group(1).strip()
+    m = re.search(r'Data do Pagamento:\s*([\d/]+)', text, re.IGNORECASE)
+    if not m: m = re.search(r'Data da Transa[cç][aã]o:\s*([\d/]+)', text, re.IGNORECASE)
+    if m: rec['data'] = m.group(1).strip()
+    m = re.search(r'Solicitante:\s*(.+)', text, re.IGNORECASE)
+    if m: rec['solicitante'] = m.group(1).strip()
+    m = re.search(r'N[uú]mero de Controle:\s*(\d+)', text, re.IGNORECASE)
+    if m: rec['num_controle'] = m.group(1).strip()
+    m = re.search(r'Data de Vencimento:\s*([\d/]+)', text, re.IGNORECASE)
+    if m: rec['data_vencimento'] = m.group(1).strip()
+    rec['tipo'] = 'BOLETO'
+    return rec
+
+def extract_pdf_data(pdf_bytes):
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            text = '\n'.join(p.extract_text() or '' for p in pdf.pages[:3])
+    except:
+        return {'tipo': 'ERRO', 'obs': 'PDF ilegível'}
+    if not text.strip():
+        return {'tipo': 'IMAGEM', 'obs': 'PDF sem texto extraível'}
+    if re.search(r'Comprovante de Pagamento Pix', text, re.IGNORECASE):
+        return extract_pix(text)
+    elif re.search(r'Pagar Boletos|Benefici[aá]rio', text, re.IGNORECASE):
+        return extract_boleto(text)
+    else:
+        rec = {'tipo': 'OUTRO'}
+        m = re.search(r'Valor[:\s]+R\$\s*([\d.,]+)', text, re.IGNORECASE)
+        if m: rec['valor'] = m.group(1).strip()
+        return rec
+
+# ---------------------------------------------------------------------------
+# FILENAME PARSER
 # ---------------------------------------------------------------------------
 def fix_year(y):
     y = y[:4]
     if y.startswith('200') and int(y) > 2030: y = '20' + y[2:]
     return y
 
-def parse_amount(raw):
+def parse_amount_str(raw):
     if raw is None: return None
-    raw = str(raw).strip()
-    is_negative = raw.startswith('-')
-    raw = raw.lstrip('-').strip()
+    raw = str(raw).strip().lstrip('-').strip()
     raw = re.sub(r'[^\d,.]', '', raw)
-    raw = re.sub(r'L$', '', raw)
-    raw = re.sub(r'\.(?=\d{3},)', '', raw)
-    raw = re.sub(r'(\d)\s+(\d)', r'\1\2', raw)
     if ',' in raw:
         parts = raw.rsplit(',', 1)
         integer_part = parts[0].replace('.', '').replace(',', '')
-        decimal_part = parts[1]
-        try:
-            val = float(f"{integer_part}.{decimal_part}")
-            return -val if is_negative else val
-        except:
-            return None
+        try: return float(f"{integer_part}.{parts[1]}")
+        except: return None
     return None
-
-def preprocess(name):
-    name = re.sub(r'^[a-zA-Z]+(?=\d{1,2}[-.\s]\d{2}[-.\s])', '', name)
-    name = re.sub(r'\s*\(VENC[^)]*\)\s*$', '', name, flags=re.IGNORECASE)
-    name = re.sub(r'\s*\(\d+\)\s*$', '', name)
-    name = re.sub(
-        r'^(\d{1,2}[-.]?\d{2}[-.]?)(\d{1})([A-Z])',
-        lambda m: m.group(1) + '2025 ' + m.group(3), name
-    )
-    return name
 
 def parse_filename(filename):
     name = re.sub(r'\.pdf$', '', filename, flags=re.IGNORECASE).strip()
-    if re.match(r'^sicredi_[A-Za-z0-9]', name, re.IGNORECASE):
-        return None, None, None, None, filename, "padrão hash — sem data"
-    name = preprocess(name)
+    name = re.sub(r'^[a-zA-Z]+(?=\d{1,2}[-.\s]\d{2}[-.\s])', '', name)
+    name = re.sub(r'\s*\(VENC[^)]*\)\s*$', '', name, flags=re.IGNORECASE)
     date_m = re.match(r'^(\d{1,2})[\s.\-]+(\d{2})[\s.\-+]+(\d{4,5})[\s.\-]*\s*', name)
     if not date_m:
-        return None, None, None, None, filename, "data não encontrada"
-    day   = date_m.group(1).zfill(2)
-    month = date_m.group(2)
-    year  = fix_year(date_m.group(3))
-    date_str  = f"{day}/{month}/{year}"
-    remainder = name[date_m.end():].strip()
-    remainder = re.sub(r'^[-–\s]+', '', remainder).strip()
-
-    amount_m = re.search(r'[-–]\s*(-?[\d.,]+,\d{2,})\s*$', remainder)
+        return None, None, None
+    date_str  = f"{date_m.group(1).zfill(2)}/{date_m.group(2)}/{fix_year(date_m.group(3))}"
+    remainder = name[date_m.end():].strip().lstrip('-–').strip()
+    amount_m  = re.search(r'[-–]\s*([\d.,]+,\d{2,})\s*$', remainder)
     if amount_m:
-        amount = parse_amount(amount_m.group(1))
-        body   = remainder[:amount_m.start()].strip().rstrip('-–').strip()
+        amount    = parse_amount_str(amount_m.group(1))
+        desc      = remainder[:amount_m.start()].strip().rstrip('-–').strip()
     else:
-        fallback_m = re.search(r'([\d.]+,\d{2,})\s*$', remainder)
-        if fallback_m:
-            amount = parse_amount(fallback_m.group(1))
-            body   = remainder[:fallback_m.start()].strip().rstrip('.-– ').strip()
-        else:
-            amount = None
-            body   = remainder.strip()
-
-    paren_m = re.search(r'\(\s*([^)]+?)\s*\)\s*$', body)
-    if paren_m:
-        payment = paren_m.group(1).strip()
-        supplier = body[:paren_m.start()].strip().rstrip('-–').strip()
-    else:
-        pay_kw = re.search(r'\b(PIX\s+\w+|BOLETO|TED|DOC|CHEQUE|DEBITO|CREDITO|SICREDI|BANCO\s+\w+)\b',
-                           body, re.IGNORECASE)
-        if pay_kw:
-            payment  = pay_kw.group(1).strip()
-            supplier = (body[:pay_kw.start()] + body[pay_kw.end():]).strip().rstrip('-–').strip()
-        else:
-            payment  = None
-            supplier = body.strip().lstrip('-–').strip()
-
-    flag = None
-    if amount is None: flag = "valor não encontrado"
-    return date_str, supplier, payment, amount, filename, flag
+        amount = None
+        desc   = remainder.strip()
+    return date_str, desc, amount
 
 # ---------------------------------------------------------------------------
-# EXCEL BUILDER
+# EXCEL BUILDER  — single clean sheet, easy to paste
 # ---------------------------------------------------------------------------
-ACCENT  = "00D4FF"
-GREEN   = "00E676"
-SURFACE = "141720"
-BG      = "0D0F12"
-BORDER  = "252A38"
+HEADERS = [
+    "Data",
+    "Valor (R$)",
+    "Tipo",
+    "Label",
+    "Destinatário",
+    "CNPJ Destinatário",
+    "CPF Destinatário",
+    "Banco Destinatário",
+    "Solicitante",
+    "Nº Controle",
+    "ID Transação",
+    "Data Vencimento",
+    "Descrição (filename)",
+    "Arquivo",
+    "Obs",
+]
+WIDTHS = [13, 14, 10, 14, 40, 20, 18, 32, 18, 16, 38, 16, 45, 58, 25]
 
-def hex_fill(hex_color): return PatternFill("solid", fgColor=hex_color)
+HDR_FILL = PatternFill("solid", fgColor="1F3864")
+HDR_FONT = Font(name="Arial", bold=True, size=9, color="FFFFFF")
+HDR_ALIGN = Alignment(horizontal="center", vertical="center")
+HDR_BORDER = Border(bottom=Side(style="medium", color="2E75B6"))
 
-def build_excel(rows_by_month, out_path):
+ODD_FILL  = PatternFill("solid", fgColor="FFFFFF")
+EVEN_FILL = PatternFill("solid", fgColor="F2F7FC")
+ERR_FILL  = PatternFill("solid", fgColor="FFF2CC")
+ROW_BORDER = Border(bottom=Side(style="thin", color="D9E1F2"))
+
+def build_excel(rows, out_path):
     wb = Workbook()
-    wb.remove(wb.active)
-
-    header_cols = ["Data", "Fornecedor / Descrição", "Forma de Pagamento", "Valor (R$)", "Arquivo"]
-    col_widths   = [14, 52, 22, 16, 60]
-
-    all_rows = []
-    for month_label in sorted(rows_by_month.keys()):
-        rows = rows_by_month[month_label]
-        ws = wb.create_sheet(title=month_label)
-        ws.sheet_view.showGridLines = False
-
-        # Title row
-        ws.merge_cells(f"A1:{get_column_letter(len(header_cols))}1")
-        title_cell = ws["A1"]
-        title_cell.value = f"FAM — Comprovantes · {month_label}"
-        title_cell.font = Font(name="Arial", bold=True, size=13, color=ACCENT)
-        title_cell.fill = hex_fill(BG)
-        title_cell.alignment = Alignment(horizontal="left", vertical="center")
-        ws.row_dimensions[1].height = 32
-
-        # Header row
-        for ci, (hdr, w) in enumerate(zip(header_cols, col_widths), 1):
-            cell = ws.cell(row=2, column=ci, value=hdr)
-            cell.font      = Font(name="Arial", bold=True, size=9, color=ACCENT)
-            cell.fill      = hex_fill(SURFACE)
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            ws.column_dimensions[get_column_letter(ci)].width = w
-        ws.row_dimensions[2].height = 20
-
-        thin = Side(style="thin", color=BORDER)
-        border = Border(bottom=Side(style="thin", color="1C2030"))
-
-        total = 0.0
-        for ri, row in enumerate(rows, 3):
-            date, supplier, payment, amount, fname, flag = row
-            row_fill = hex_fill("0A0C10") if ri % 2 == 0 else hex_fill(BG)
-            values = [date or "", supplier or fname, payment or "", amount or "", fname]
-            for ci, val in enumerate(values, 1):
-                cell = ws.cell(row=ri, column=ci, value=val)
-                cell.fill      = row_fill
-                cell.alignment = Alignment(vertical="center")
-                cell.border    = border
-                if ci == 4:
-                    cell.number_format = '#.##0,00'
-                    cell.font = Font(name="Arial", size=9,
-                                     color="FF5252" if flag else "E8ECF4")
-                else:
-                    cell.font = Font(name="Arial", size=9,
-                                     color="6B7599" if flag else "E8ECF4")
-            ws.row_dimensions[ri].height = 16
-            if amount: total += amount
-            all_rows.append(row)
-
-        # Total row
-        tr = len(rows) + 3
-        ws.merge_cells(f"A{tr}:C{tr}")
-        tot_label = ws[f"A{tr}"]
-        tot_label.value     = "TOTAL"
-        tot_label.font      = Font(name="Arial", bold=True, size=9, color=ACCENT)
-        tot_label.fill      = hex_fill(SURFACE)
-        tot_label.alignment = Alignment(horizontal="right", vertical="center")
-        tot_val = ws.cell(row=tr, column=4, value=total)
-        tot_val.font         = Font(name="Arial", bold=True, size=9, color=GREEN)
-        tot_val.fill         = hex_fill(SURFACE)
-        tot_val.number_format = '#.##0,00'
-        tot_val.alignment    = Alignment(horizontal="center", vertical="center")
-        ws.row_dimensions[tr].height = 20
-
-    # Summary sheet
-    ws = wb.create_sheet(title="Resumo", index=0)
+    ws = wb.active
+    ws.title = "COMPROVANTES"
     ws.sheet_view.showGridLines = False
-    ws.merge_cells(f"A1:{get_column_letter(len(header_cols))}1")
-    c = ws["A1"]
-    c.value = "FAM — Resumo Consolidado"
-    c.font  = Font(name="Arial", bold=True, size=13, color=ACCENT)
-    c.fill  = hex_fill(BG)
-    c.alignment = Alignment(horizontal="left", vertical="center")
-    ws.row_dimensions[1].height = 32
+    ws.freeze_panes = "A2"
 
-    for ci, (hdr, w) in enumerate(zip(header_cols, col_widths), 1):
-        cell = ws.cell(row=2, column=ci, value=hdr)
-        cell.font      = Font(name="Arial", bold=True, size=9, color=ACCENT)
-        cell.fill      = hex_fill(SURFACE)
-        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for ci, (hdr, w) in enumerate(zip(HEADERS, WIDTHS), 1):
+        cell = ws.cell(row=1, column=ci, value=hdr)
+        cell.font      = HDR_FONT
+        cell.fill      = HDR_FILL
+        cell.alignment = HDR_ALIGN
+        cell.border    = HDR_BORDER
         ws.column_dimensions[get_column_letter(ci)].width = w
-    ws.row_dimensions[2].height = 20
+    ws.row_dimensions[1].height = 20
 
-    border = Border(bottom=Side(style="thin", color="1C2030"))
-    grand_total = 0.0
-    for ri, row in enumerate(all_rows, 3):
-        date, supplier, payment, amount, fname, flag = row
-        row_fill = hex_fill("0A0C10") if ri % 2 == 0 else hex_fill(BG)
-        values = [date or "", supplier or fname, payment or "", amount or "", fname]
+    for ri, row in enumerate(rows, 2):
+        fill = ERR_FILL if row.get('obs') else (EVEN_FILL if ri % 2 == 0 else ODD_FILL)
+
+        values = [
+            row.get('data', ''),
+            row.get('valor'),
+            row.get('tipo', ''),
+            row.get('label', ''),
+            row.get('destinatario_nome', ''),
+            row.get('destinatario_cnpj', ''),
+            row.get('destinatario_cpf', ''),
+            row.get('banco', ''),
+            row.get('solicitante', ''),
+            row.get('num_controle', ''),
+            row.get('id_transacao', ''),
+            row.get('data_vencimento', ''),
+            row.get('desc_filename', ''),
+            row.get('arquivo', ''),
+            row.get('obs', ''),
+        ]
         for ci, val in enumerate(values, 1):
             cell = ws.cell(row=ri, column=ci, value=val)
-            cell.fill      = row_fill
+            cell.fill      = fill
             cell.alignment = Alignment(vertical="center")
-            cell.border    = border
-            if ci == 4:
-                cell.number_format = '#.##0,00'
-                cell.font = Font(name="Arial", size=9,
-                                 color="FF5252" if flag else "E8ECF4")
-            else:
-                cell.font = Font(name="Arial", size=9,
-                                 color="6B7599" if flag else "E8ECF4")
-        ws.row_dimensions[ri].height = 16
-        if amount: grand_total += amount
+            cell.border    = ROW_BORDER
+            cell.font      = Font(name="Arial", size=9)
+            if ci == 2:  # Valor
+                cell.number_format = '#,##0.00'
+        ws.row_dimensions[ri].height = 15
 
-    tr = len(all_rows) + 3
-    ws.merge_cells(f"A{tr}:C{tr}")
-    tl = ws[f"A{tr}"]
-    tl.value = "TOTAL GERAL"
-    tl.font  = Font(name="Arial", bold=True, size=9, color=ACCENT)
-    tl.fill  = hex_fill(SURFACE)
-    tl.alignment = Alignment(horizontal="right", vertical="center")
-    tv = ws.cell(row=tr, column=4, value=grand_total)
-    tv.font         = Font(name="Arial", bold=True, size=9, color=GREEN)
-    tv.fill         = hex_fill(SURFACE)
-    tv.number_format = '#.##0,00'
-    tv.alignment    = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[tr].height = 20
+    # auto-filter on header row
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(HEADERS))}1"
 
     wb.save(out_path)
 
@@ -333,41 +318,62 @@ def run_parse(task_id, zip_path):
         logger.info(msg)
 
     try:
-        log("Lendo arquivos do ZIP...")
+        log("Lendo ZIP...")
         with zipfile.ZipFile(zip_path, 'r') as zf:
-            names = [n for n in zf.namelist() if n.lower().endswith('.pdf')]
+            all_names = [n for n in zf.namelist() if n.lower().endswith('.pdf')]
+        log(f"{len(all_names)} comprovantes encontrados. Extraindo PDFs...")
 
-        log(f"{len(names)} comprovantes encontrados.")
+        rows = []
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            for i, fname in enumerate(all_names):
+                if (i + 1) % 200 == 0:
+                    log(f"  {i+1}/{len(all_names)}...")
+                basename = os.path.basename(fname)
+                date_fn, desc_fn, amount_fn = parse_filename(basename)
+                try:
+                    pdf_data = extract_pdf_data(zf.read(fname))
+                except Exception as e:
+                    pdf_data = {'tipo': 'ERRO', 'obs': str(e)}
 
-        rows_by_month = {}
-        flagged = 0
-        for fname in names:
-            basename = os.path.basename(fname)
-            date, supplier, payment, amount, original, flag = parse_filename(basename)
-            if flag: flagged += 1
+                # prefer PDF-extracted data, fall back to filename
+                valor_str = pdf_data.get('valor')
+                if valor_str:
+                    try:
+                        valor = float(valor_str.replace('.', '').replace(',', '.'))
+                    except:
+                        valor = amount_fn
+                else:
+                    valor = amount_fn
 
-            # Derive month label from parsed date or filename
-            if date:
-                parts = date.split('/')
-                month_label = f"{parts[1]}-{parts[2]}"
-            else:
-                # Try to grab month from filename directly
-                m = re.search(r'\d{1,2}[-./]\d{2}[-./](\d{4})', basename)
-                month_label = "Sem Data"
+                rows.append({
+                    'arquivo':           basename,
+                    'tipo':              pdf_data.get('tipo', ''),
+                    'label':             pdf_data.get('label', ''),
+                    'data':              pdf_data.get('data') or date_fn or '',
+                    'valor':             valor,
+                    'destinatario_nome': pdf_data.get('destinatario_nome', ''),
+                    'destinatario_cnpj': pdf_data.get('destinatario_cnpj', ''),
+                    'destinatario_cpf':  pdf_data.get('destinatario_cpf', ''),
+                    'banco':             pdf_data.get('banco', ''),
+                    'solicitante':       pdf_data.get('solicitante', ''),
+                    'num_controle':      pdf_data.get('num_controle', ''),
+                    'id_transacao':      pdf_data.get('id_transacao', ''),
+                    'data_vencimento':   pdf_data.get('data_vencimento', ''),
+                    'desc_filename':     desc_fn or '',
+                    'obs':               pdf_data.get('obs', ''),
+                })
 
-            rows_by_month.setdefault(month_label, []).append(
-                (date, supplier, payment, amount, original, flag)
-            )
-
-        log(f"Parseados: {len(names) - flagged} OK · {flagged} com flag")
+        ok     = sum(1 for r in rows if not r['obs'])
+        flagged = len(rows) - ok
+        log(f"Extração: {ok} OK · {flagged} com observação")
         log("Gerando Excel...")
 
         out_path = os.path.join(app.config['OUTPUT_FOLDER'], f"{task_id}.xlsx")
-        build_excel(rows_by_month, out_path)
+        build_excel(rows, out_path)
 
         tasks[task_id]['status'] = 'DONE'
         tasks[task_id]['file']   = out_path
-        log(f"Concluído! {len(names)} comprovantes → Excel pronto.")
+        log(f"Pronto! {len(rows)} linhas → FAM_Comprovantes.xlsx")
 
     except Exception as e:
         import traceback
@@ -418,5 +424,5 @@ def download(task_id):
 # ---------------------------------------------------------------------------
 if __name__ == '__main__':
     try_self_update()
-    logger.info("FAM App (ZIP Parser) starting on port 5002")
+    logger.info("FAM App (Comprovantes Parser) starting on port 5002")
     app.run(host='0.0.0.0', port=5002, debug=False)
