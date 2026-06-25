@@ -2,8 +2,7 @@
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
-set "INSTALL_DIR=%~dp0"
-if "%INSTALL_DIR:~-1%"=="\" set "INSTALL_DIR=%INSTALL_DIR:~0,-1%"
+set "INSTALL_DIR=C:\fam-app"
 
 echo.
 echo  ================================================================
@@ -15,7 +14,7 @@ echo  Diretorio de instalacao: %INSTALL_DIR%
 echo.
 
 if not exist "%INSTALL_DIR%\app.py" (
-    echo [ERRO] app.py nao encontrado.
+    echo [ERRO] app.py nao encontrado em %INSTALL_DIR%.
     echo        Execute INSTALAR.bat primeiro.
     pause & exit /b 1
 )
@@ -28,10 +27,6 @@ if "!PYTHON_CMD!"=="" (
     if not errorlevel 1 set PYTHON_CMD=python
 )
 if "!PYTHON_CMD!"=="" (
-    python3 --version >nul 2>&1
-    if not errorlevel 1 set PYTHON_CMD=python3
-)
-if "!PYTHON_CMD!"=="" (
     echo [ERRO] Python nao encontrado. Instale o Python e marque "Add to PATH".
     pause & exit /b 1
 )
@@ -39,7 +34,6 @@ echo [OK] Python: !PYTHON_CMD!
 !PYTHON_CMD! --version
 
 set PYTHONIOENCODING=utf-8
-set PYTHONUTF8=1
 
 echo.
 echo Instalando dependencias...
@@ -64,7 +58,7 @@ if not exist "%INSTALL_DIR%\config.json" (
 
 echo.
 echo Criando atalho na area de trabalho...
-powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([System.IO.Path]::Combine([System.Environment]::GetFolderPath('Desktop'), 'FAM App.lnk')); $s.TargetPath = 'wscript.exe'; $s.Arguments = '\"%INSTALL_DIR%\launch.vbs\"'; $s.WorkingDirectory = '%INSTALL_DIR%'; $s.WindowStyle = 7; if (Test-Path '%INSTALL_DIR%\fam.ico') { $s.IconLocation = '%INSTALL_DIR%\fam.ico' }; $s.Description = 'FAM App'; $s.Save()"
+powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([System.IO.Path]::Combine([System.Environment]::GetFolderPath('Desktop'), 'FAM App.lnk')); $s.TargetPath = 'wscript.exe'; $s.Arguments = '""C:\fam-app\launch.vbs""'; $s.WorkingDirectory = 'C:\fam-app'; $s.WindowStyle = 7; if (Test-Path 'C:\fam-app\fam.ico') { $s.IconLocation = 'C:\fam-app\fam.ico,0' }; $s.Description = 'FAM App'; $s.Save()"
 echo [OK] Atalho criado
 
 echo.
