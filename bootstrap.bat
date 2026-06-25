@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 echo.
@@ -135,4 +135,4 @@ echo [OK] Codigo do FAM App presente em %INSTALL_DIR%.
 echo.
 echo Continuando instalacao...
 cd /d "%INSTALL_DIR%"
-call install_part1.bat
+cd /d "C:\fam-app" && call install_part2.bat
