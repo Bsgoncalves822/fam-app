@@ -1,14 +1,18 @@
 ' FAM App Launcher
 ' Kills any existing instance, starts Flask, waits for ready, opens browser
 
-Dim WShell, FSO, http, port, appDir, configPath
+Dim WShell, FSO, http, port, appDir, configPath, pythonCmd
 Set WShell = CreateObject("WScript.Shell")
 Set FSO = CreateObject("Scripting.FileSystemObject")
 
 ' Derive install directory from this script's own location (no hardcoded path)
 appDir = FSO.GetParentFolderName(WScript.ScriptFullName)
 
-' Default port; override from config.json's "port" key if present
+' Set encoding environment variables
+WShell.Environment("Process")("PYTHONIOENCODING") = "utf-8"
+WShell.Environment("Process")("PYTHONUTF8") = "1"
+
+' Default port; override from config.json if present
 port = 5002
 configPath = appDir & "\config.json"
 If FSO.FileExists(configPath) Then
@@ -29,11 +33,17 @@ Dim baseUrl
 baseUrl = "http://localhost:" & port & "/"
 
 ' Kill any existing instance on the configured port
-WShell.Run "cmd /c for /f ""tokens=5"" %a in ('netstat -aon ^| find "":" & port & """') do taskkill /f /pid %a", 0, True
+WShell.Run "cmd /c for /f ""tokens=5"" %a in ('netstat -aon ^| find "":"" & port & """"""') do taskkill /f /pid %a", 0, True
+
+' Find Python — try py launcher first (Windows standard), then python
+pythonCmd = "python"
+Dim testResult
+testResult = WShell.Run("cmd /c py --version >nul 2>&1", 0, True)
+If testResult = 0 Then pythonCmd = "py"
 
 ' Start Flask silently from the app directory
 WShell.CurrentDirectory = appDir
-WShell.Run "cmd /c python app.py", 0, False
+WShell.Run "cmd /c set PYTHONIOENCODING=utf-8 && set PYTHONUTF8=1 && " & pythonCmd & " app.py", 0, False
 
 ' Wait for Flask to be ready (health check loop)
 WScript.Sleep 2000
@@ -53,5 +63,5 @@ Do While attempts < 15
     attempts = attempts + 1
 Loop
 
-' If we get here Flask didn't start - show error
-MsgBox "Erro ao iniciar FAM App. Verifique se o Python esta instalado corretamente.", 16, "FAM App"
+MsgBox "Erro ao iniciar FAM App." & Chr(13) & Chr(10) & _
+       "Verifique se o Python esta instalado e tente novamente.", 16, "FAM App"

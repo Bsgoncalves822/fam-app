@@ -7,94 +7,91 @@ echo   ORPROCON / Contadores Digitais
 echo  ================================================================
 echo.
 
-:: Derive install dir from this script's own location (no hardcoded path)
+:: Derive install dir dynamically from this script's location
 set "INSTALL_DIR=%~dp0"
 if "%INSTALL_DIR:~-1%"=="\" set "INSTALL_DIR=%INSTALL_DIR:~0,-1%"
 
-:: Hard check: app code must be present before continuing
+:: Verify essential files
 if not exist "%INSTALL_DIR%\app.py" (
-    echo [ERRO] %INSTALL_DIR%\app.py nao encontrado.
-    echo        A instalacao nao pode continuar. Execute bootstrap.bat
-    echo        para obter o codigo do FAM App corretamente.
-    pause
-    exit /b 1
+    echo [ERRO] app.py nao encontrado em %INSTALL_DIR%.
+    echo        Execute bootstrap.bat primeiro.
+    pause & exit /b 1
 )
 if not exist "%INSTALL_DIR%\templates\index.html" (
-    echo [ERRO] %INSTALL_DIR%\templates\index.html nao encontrado.
-    echo        A instalacao nao pode continuar. Execute bootstrap.bat
-    echo        para obter o codigo do FAM App corretamente.
-    pause
-    exit /b 1
+    echo [ERRO] templates\index.html nao encontrado.
+    pause & exit /b 1
 )
 if not exist "%INSTALL_DIR%\launch.vbs" (
-    echo [ERRO] %INSTALL_DIR%\launch.vbs nao encontrado.
-    echo        A instalacao nao pode continuar. Execute bootstrap.bat
-    echo        para obter o codigo do FAM App corretamente.
-    pause
-    exit /b 1
+    echo [ERRO] launch.vbs nao encontrado.
+    pause & exit /b 1
 )
 
-:: Verify this is a git checkout (required for auto-update)
-if not exist "%INSTALL_DIR%\.git" (
-    echo [AVISO] %INSTALL_DIR% nao e um repositorio git.
-    echo         A atualizacao automatica nao funcionara.
-    echo         Use bootstrap.bat para uma instalacao completa via git.
-    echo.
+:: Find Python — check py launcher, then python, then python3
+set PYTHON_CMD=
+py --version >nul 2>&1
+if not errorlevel 1 set PYTHON_CMD=py
+if "%PYTHON_CMD%"=="" (
+    python --version >nul 2>&1
+    if not errorlevel 1 set PYTHON_CMD=python
 )
+if "%PYTHON_CMD%"=="" (
+    python3 --version >nul 2>&1
+    if not errorlevel 1 set PYTHON_CMD=python3
+)
+if "%PYTHON_CMD%"=="" (
+    echo [ERRO] Python nao encontrado. Instale o Python e marque "Add to PATH".
+    pause & exit /b 1
+)
+echo [OK] Python encontrado via: %PYTHON_CMD%
+%PYTHON_CMD% --version
 
-:: Verify Python now available
-python --version >nul 2>&1
-if errorlevel 1 (
-    echo [ERRO] Python ainda nao encontrado no PATH.
-    echo        Reinstale o Python e marque "Add Python to PATH".
-    pause
-    exit /b 1
-)
-echo [OK] Python encontrado
-python --version
+:: Set PYTHONIOENCODING to avoid encoding issues on PT-BR Windows
+set PYTHONIOENCODING=utf-8
+set PYTHONUTF8=1
 
 :: Install dependencies
 echo.
 echo Instalando dependencias Python...
-pip install flask pandas openpyxl pdfplumber requests --quiet
+%PYTHON_CMD% -m pip install --upgrade pip --quiet
+%PYTHON_CMD% -m pip install flask openpyxl pdfplumber requests --quiet
 if errorlevel 1 (
     echo [ERRO] Falha ao instalar dependencias.
-    pause
-    exit /b 1
+    pause & exit /b 1
 )
 echo [OK] Dependencias instaladas
 
-:: Create folders
-if not exist "%INSTALL_DIR%\data" mkdir "%INSTALL_DIR%\data"
+:: Create runtime folders
+if not exist "%INSTALL_DIR%\data"    mkdir "%INSTALL_DIR%\data"
 if not exist "%INSTALL_DIR%\uploads" mkdir "%INSTALL_DIR%\uploads"
 if not exist "%INSTALL_DIR%\outputs" mkdir "%INSTALL_DIR%\outputs"
+if not exist "%INSTALL_DIR%\logs"    mkdir "%INSTALL_DIR%\logs"
 echo [OK] Pastas criadas
 
-:: Generate reference data
+:: Write config.json with defaults if not present
+if not exist "%INSTALL_DIR%\config.json" (
+    echo { > "%INSTALL_DIR%\config.json"
+    echo     "port": 5002 >> "%INSTALL_DIR%\config.json"
+    echo } >> "%INSTALL_DIR%\config.json"
+    echo [OK] config.json criado
+)
+
+:: Patch launch.vbs to use correct Python command
 echo.
-echo Gerando dados de referencia...
-python "%INSTALL_DIR%\generate_data.py"
+echo Configurando launcher para usar: %PYTHON_CMD%
+powershell -NoProfile -Command ^
+    "(Get-Content '%INSTALL_DIR%\launch.vbs') -replace 'python app\.py', '%PYTHON_CMD% app.py' | Set-Content '%INSTALL_DIR%\launch.vbs' -Encoding UTF8"
 
 :: Create desktop shortcut
 echo.
-if not exist "%INSTALL_DIR%\launch.vbs" (
-    echo [ERRO] launch.vbs nao encontrado - atalho nao sera criado.
-    pause
-    exit /b 1
-)
 echo Criando atalho na area de trabalho...
-if exist "%INSTALL_DIR%\fam.ico" (
-    powershell -command "$q=[char]34; $ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([System.IO.Path]::Combine([System.Environment]::GetFolderPath('Desktop'), 'FAM App.lnk')); $s.TargetPath = 'wscript.exe'; $s.Arguments = $q + '%INSTALL_DIR%\launch.vbs' + $q; $s.WorkingDirectory = '%INSTALL_DIR%'; $s.WindowStyle = 7; $s.IconLocation = '%INSTALL_DIR%\fam.ico'; $s.Description = 'FAM Reconciliacao Bancaria'; $s.Save()"
-) else (
-    echo [AVISO] fam.ico nao encontrado - atalho usara icone padrao.
-    powershell -command "$q=[char]34; $ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([System.IO.Path]::Combine([System.Environment]::GetFolderPath('Desktop'), 'FAM App.lnk')); $s.TargetPath = 'wscript.exe'; $s.Arguments = $q + '%INSTALL_DIR%\launch.vbs' + $q; $s.WorkingDirectory = '%INSTALL_DIR%'; $s.WindowStyle = 7; $s.Description = 'FAM Reconciliacao Bancaria'; $s.Save()"
-)
+powershell -NoProfile -Command ^
+    "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([System.IO.Path]::Combine([System.Environment]::GetFolderPath('Desktop'), 'FAM App.lnk')); $s.TargetPath = 'wscript.exe'; $s.Arguments = '\""%INSTALL_DIR%\launch.vbs\""'; $s.WorkingDirectory = '%INSTALL_DIR%'; $s.WindowStyle = 7; if (Test-Path '%INSTALL_DIR%\fam.ico') { $s.IconLocation = '%INSTALL_DIR%\fam.ico' }; $s.Description = 'FAM App - Parser de Comprovantes'; $s.Save()"
 echo [OK] Atalho "FAM App" criado na area de trabalho
 
 echo.
 echo  ================================================================
 echo   Instalacao concluida!
-echo   Use o atalho "FAM App" na area de trabalho para iniciar.
+echo   Clique em "FAM App" na area de trabalho para iniciar.
 echo  ================================================================
 echo.
 pause
