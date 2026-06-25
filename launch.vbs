@@ -1,4 +1,4 @@
-' FAM App Launcher
+﻿' FAM App Launcher
 ' Kills any existing instance, starts Flask, waits for ready, opens browser
 
 Dim WShell, FSO, http, port, appDir, configPath, pythonCmd
@@ -35,7 +35,7 @@ baseUrl = "http://localhost:" & port & "/"
 ' Kill any existing instance on the configured port
 WShell.Run "cmd /c for /f ""tokens=5"" %a in ('netstat -aon ^| find "":"" & port & """"""') do taskkill /f /pid %a", 0, True
 
-' Find Python — try py launcher first (Windows standard), then python
+' Find Python â€” try py launcher first (Windows standard), then python
 pythonCmd = "python"
 Dim testResult
 testResult = WShell.Run("cmd /c py --version >nul 2>&1", 0, True)
@@ -46,7 +46,7 @@ WShell.CurrentDirectory = appDir
 WShell.Run "cmd /c set PYTHONIOENCODING=utf-8 && set PYTHONUTF8=1 && " & pythonCmd & " app.py", 0, False
 
 ' Wait for Flask to be ready (health check loop)
-WScript.Sleep 2000
+WScript.Sleep 5000
 Dim attempts
 attempts = 0
 Do While attempts < 15
