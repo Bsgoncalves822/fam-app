@@ -10,5 +10,5 @@ WShell.Run "cmd /c for /f ""tokens=5"" %a in ('netstat -aon ^| find "":"" & port
 WShell.CurrentDirectory = appDir
 WShell.Run "cmd /c set PYTHONIOENCODING=utf-8 && py app.py", 0, False
 
-WScript.Sleep 8000
+WScript.Sleep 12000
 WShell.Run "http://localhost:" & port & "/"
