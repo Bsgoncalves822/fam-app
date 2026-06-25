@@ -1,4 +1,4 @@
-﻿import os, re, uuid, threading, zipfile, io, time, requests, logging, json, sys, hashlib
+import os, re, uuid, threading, zipfile, io, time, requests, logging, json, sys, hashlib
 from datetime import datetime
 from flask import Flask, request, jsonify, send_file, render_template
 from openpyxl import Workbook
@@ -113,15 +113,15 @@ def clean_cnpj(raw):
 
 def extract_pix(text):
     rec = {}
-    m = re.search(r'Nome do destinat[aÃ¡]rio:\s*(.+)', text, re.IGNORECASE)
+    m = re.search(r'Nome do destinat[a??]rio:\s*(.+)', text, re.IGNORECASE)
     if m: rec['destinatario_nome'] = m.group(1).strip()
-    m = re.search(r'CNPJ do destinat[aÃ¡]rio:\s*([\d.\/\-]+)', text, re.IGNORECASE)
+    m = re.search(r'CNPJ do destinat[a??]rio:\s*([\d.\/\-]+)', text, re.IGNORECASE)
     if m:
         cnpj = clean_cnpj(m.group(1))
         if cnpj != FAM_CNPJ: rec['destinatario_cnpj'] = cnpj
-    m = re.search(r'CPF do destinat[aÃ¡]rio:\s*([\*\d.\-]+)', text, re.IGNORECASE)
+    m = re.search(r'CPF do destinat[a??]rio:\s*([\*\d.\-]+)', text, re.IGNORECASE)
     if m: rec['destinatario_cpf'] = m.group(1).strip()
-    m = re.search(r'Institui[cÃ§][aÃ£]o do destinat[aÃ¡]rio:\s*(.+)', text, re.IGNORECASE)
+    m = re.search(r'Institui[c??][a??]o do destinat[a??]rio:\s*(.+)', text, re.IGNORECASE)
     if m: rec['banco'] = m.group(1).strip()
     m = re.search(r'Valor:\s*R\$\s*([\d.,]+)', text, re.IGNORECASE)
     if m: rec['valor'] = m.group(1).strip()
@@ -129,12 +129,12 @@ def extract_pix(text):
     if m: rec['data'] = m.group(1).strip()
     m = re.search(r'Solicitante:\s*(.+)', text, re.IGNORECASE)
     if m: rec['solicitante'] = m.group(1).strip()
-    m = re.search(r'ID da transa[cÃ§][aÃ£]o:\s*(\S+)', text, re.IGNORECASE)
+    m = re.search(r'ID da transa[c??][a??]o:\s*(\S+)', text, re.IGNORECASE)
     if m: rec['id_transacao'] = m.group(1).strip()
-    m = re.search(r'N[uÃº]mero de Controle:\s*(\d+)', text, re.IGNORECASE)
+    m = re.search(r'N[u??]mero de Controle:\s*(\d+)', text, re.IGNORECASE)
     if m: rec['num_controle'] = m.group(1).strip()
-    # label like RESCISÃƒO sitting between header and Valor line
-    m = re.search(r'Comprovante de Pagamento Pix\s*\n([A-ZÃÃ‰ÃÃ“ÃšÃƒÃ•Ã‡ ]{3,})\n', text, re.IGNORECASE)
+    # label like RESCIS??O sitting between header and Valor line
+    m = re.search(r'Comprovante de Pagamento Pix\s*\n([A-Z???????????????? ]{3,})\n', text, re.IGNORECASE)
     if m:
         label = m.group(1).strip()
         if label.upper() not in ('VALOR', 'REALIZADO'):
@@ -144,27 +144,27 @@ def extract_pix(text):
 
 def extract_boleto(text):
     rec = {}
-    for pat in [r'Raz[aÃ£]o Social do Benefici[aÃ¡]rio:\s*(.+)',
-                r'Nome Fantasia do Benefici[aÃ¡]rio:\s*(.+)']:
+    for pat in [r'Raz[a??]o Social do Benefici[a??]rio:\s*(.+)',
+                r'Nome Fantasia do Benefici[a??]rio:\s*(.+)']:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
             rec['destinatario_nome'] = m.group(1).strip()
             break
-    m = re.search(r'CPF/CNPJ do Benefici[aÃ¡]rio:\s*([\d.\/\-]+)', text, re.IGNORECASE)
+    m = re.search(r'CPF/CNPJ do Benefici[a??]rio:\s*([\d.\/\-]+)', text, re.IGNORECASE)
     if m:
         cnpj = clean_cnpj(m.group(1))
         if cnpj != FAM_CNPJ: rec['destinatario_cnpj'] = cnpj
-    m = re.search(r'Institui[cÃ§][aÃ£]o Emissora:\s*(.+)', text, re.IGNORECASE)
+    m = re.search(r'Institui[c??][a??]o Emissora:\s*(.+)', text, re.IGNORECASE)
     if m: rec['banco'] = m.group(1).strip()
-    m = re.search(r'Valor do T[iÃ­]tulo \(R\$\):\s*([\d.,]+)', text, re.IGNORECASE)
+    m = re.search(r'Valor do T[i??]tulo \(R\$\):\s*([\d.,]+)', text, re.IGNORECASE)
     if not m: m = re.search(r'Valor\s*\(R\$\):\s*([\d.,]+)', text, re.IGNORECASE)
     if m: rec['valor'] = m.group(1).strip()
     m = re.search(r'Data do Pagamento:\s*([\d/]+)', text, re.IGNORECASE)
-    if not m: m = re.search(r'Data da Transa[cÃ§][aÃ£]o:\s*([\d/]+)', text, re.IGNORECASE)
+    if not m: m = re.search(r'Data da Transa[c??][a??]o:\s*([\d/]+)', text, re.IGNORECASE)
     if m: rec['data'] = m.group(1).strip()
     m = re.search(r'Solicitante:\s*(.+)', text, re.IGNORECASE)
     if m: rec['solicitante'] = m.group(1).strip()
-    m = re.search(r'N[uÃº]mero de Controle:\s*(\d+)', text, re.IGNORECASE)
+    m = re.search(r'N[u??]mero de Controle:\s*(\d+)', text, re.IGNORECASE)
     if m: rec['num_controle'] = m.group(1).strip()
     m = re.search(r'Data de Vencimento:\s*([\d/]+)', text, re.IGNORECASE)
     if m: rec['data_vencimento'] = m.group(1).strip()
@@ -176,12 +176,12 @@ def extract_pdf_data(pdf_bytes):
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             text = '\n'.join(p.extract_text() or '' for p in pdf.pages[:3])
     except:
-        return {'tipo': 'ERRO', 'obs': 'PDF ilegÃ­vel'}
+        return {'tipo': 'ERRO', 'obs': 'PDF ileg??vel'}
     if not text.strip():
-        return {'tipo': 'IMAGEM', 'obs': 'PDF sem texto extraÃ­vel'}
+        return {'tipo': 'IMAGEM', 'obs': 'PDF sem texto extra??vel'}
     if re.search(r'Comprovante de Pagamento Pix', text, re.IGNORECASE):
         return extract_pix(text)
-    elif re.search(r'Pagar Boletos|Benefici[aÃ¡]rio', text, re.IGNORECASE):
+    elif re.search(r'Pagar Boletos|Benefici[a??]rio', text, re.IGNORECASE):
         return extract_boleto(text)
     else:
         rec = {'tipo': 'OUTRO'}
@@ -216,33 +216,33 @@ def parse_filename(filename):
     if not date_m:
         return None, None, None
     date_str  = f"{date_m.group(1).zfill(2)}/{date_m.group(2)}/{fix_year(date_m.group(3))}"
-    remainder = name[date_m.end():].strip().lstrip('-â€“').strip()
-    amount_m  = re.search(r'[-â€“]\s*([\d.,]+,\d{2,})\s*$', remainder)
+    remainder = name[date_m.end():].strip().lstrip('-???').strip()
+    amount_m  = re.search(r'[-???]\s*([\d.,]+,\d{2,})\s*$', remainder)
     if amount_m:
         amount    = parse_amount_str(amount_m.group(1))
-        desc      = remainder[:amount_m.start()].strip().rstrip('-â€“').strip()
+        desc      = remainder[:amount_m.start()].strip().rstrip('-???').strip()
     else:
         amount = None
         desc   = remainder.strip()
     return date_str, desc, amount
 
 # ---------------------------------------------------------------------------
-# EXCEL BUILDER  â€” single clean sheet, easy to paste
+# EXCEL BUILDER  ??? single clean sheet, easy to paste
 # ---------------------------------------------------------------------------
 HEADERS = [
     "Data",
     "Valor (R$)",
     "Tipo",
     "Label",
-    "DestinatÃ¡rio",
-    "CNPJ DestinatÃ¡rio",
-    "CPF DestinatÃ¡rio",
-    "Banco DestinatÃ¡rio",
+    "Destinat??rio",
+    "CNPJ Destinat??rio",
+    "CPF Destinat??rio",
+    "Banco Destinat??rio",
     "Solicitante",
-    "NÂº Controle",
-    "ID TransaÃ§Ã£o",
+    "N?? Controle",
+    "ID Transa????o",
     "Data Vencimento",
-    "DescriÃ§Ã£o (filename)",
+    "Descri????o (filename)",
     "Arquivo",
     "Obs",
 ]
@@ -365,7 +365,7 @@ def run_parse(task_id, zip_path):
 
         ok     = sum(1 for r in rows if not r['obs'])
         flagged = len(rows) - ok
-        log(f"ExtraÃ§Ã£o: {ok} OK Â· {flagged} com observaÃ§Ã£o")
+        log(f"Extra????o: {ok} OK ?? {flagged} com observa????o")
         log("Gerando Excel...")
 
         out_path = os.path.join(app.config['OUTPUT_FOLDER'], f"{task_id}.xlsx")
@@ -373,7 +373,7 @@ def run_parse(task_id, zip_path):
 
         tasks[task_id]['status'] = 'DONE'
         tasks[task_id]['file']   = out_path
-        log(f"Pronto! {len(rows)} linhas â†’ FAM_Comprovantes.xlsx")
+        log(f"Pronto! {len(rows)} linhas ??? FAM_Comprovantes.xlsx")
 
     except Exception as e:
         import traceback
@@ -423,8 +423,7 @@ def download(task_id):
 # ENTRY POINT
 # ---------------------------------------------------------------------------
 if __name__ == '__main__':
-    import threading
-    threading.Thread(target=try_self_update, daemon=True).start()
+    pass  # auto-update disabled
     logger.info("FAM App (Comprovantes Parser) starting on port 5002")
     app.run(host='0.0.0.0', port=5002, debug=False)
 

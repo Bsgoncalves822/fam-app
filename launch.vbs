@@ -1,18 +1,9 @@
-﻿' FAM App Launcher
-' Kills any existing instance, starts Flask, waits for ready, opens browser
-
-Dim WShell, FSO, http, port, appDir, configPath, pythonCmd
+Dim WShell, FSO, http, port, appDir, configPath, pythonPath
 Set WShell = CreateObject("WScript.Shell")
 Set FSO = CreateObject("Scripting.FileSystemObject")
 
-' Derive install directory from this script's own location (no hardcoded path)
 appDir = FSO.GetParentFolderName(WScript.ScriptFullName)
 
-' Set encoding environment variables
-WShell.Environment("Process")("PYTHONIOENCODING") = "utf-8"
-WShell.Environment("Process")("PYTHONUTF8") = "1"
-
-' Default port; override from config.json if present
 port = 5002
 configPath = appDir & "\config.json"
 If FSO.FileExists(configPath) Then
@@ -24,32 +15,44 @@ If FSO.FileExists(configPath) Then
     re.Pattern = """port""\s*:\s*(\d+)"
     re.Global = False
     Set matches = re.Execute(cfgText)
-    If matches.Count > 0 Then
-        port = CInt(matches(0).SubMatches(0))
-    End If
+    If matches.Count > 0 Then port = CInt(matches(0).SubMatches(0))
 End If
 
 Dim baseUrl
 baseUrl = "http://localhost:" & port & "/"
 
-' Kill any existing instance on the configured port
 WShell.Run "cmd /c for /f ""tokens=5"" %a in ('netstat -aon ^| find "":"" & port & """"""') do taskkill /f /pid %a", 0, True
 
-' Find Python â€” try py launcher first (Windows standard), then python
-pythonCmd = "python"
-Dim testResult
-testResult = WShell.Run("cmd /c py --version >nul 2>&1", 0, True)
-If testResult = 0 Then pythonCmd = "py"
+' Find python dynamically
+Dim oExec, sLine
+pythonPath = ""
+Set oExec = WShell.Exec("cmd /c where python")
+Do While Not oExec.StdOut.AtEndOfStream
+    sLine = Trim(oExec.StdOut.ReadLine())
+    If InStr(sLine, "python.exe") > 0 And InStr(sLine, "WindowsApps") = 0 Then
+        pythonPath = sLine
+        Exit Do
+    End If
+Loop
+If pythonPath = "" Then
+    Set oExec = WShell.Exec("cmd /c where python")
+    Do While Not oExec.StdOut.AtEndOfStream
+        sLine = Trim(oExec.StdOut.ReadLine())
+        If InStr(sLine, "python.exe") > 0 Then
+            pythonPath = sLine
+            Exit Do
+        End If
+    Loop
+End If
+If pythonPath = "" Then pythonPath = "python"
 
-' Start Flask silently from the app directory
 WShell.CurrentDirectory = appDir
-WShell.Run "cmd /c set PYTHONIOENCODING=utf-8 && set PYTHONUTF8=1 && " & pythonCmd & " app.py", 0, False
+WShell.Run "cmd /c set PYTHONIOENCODING=utf-8 && set PYTHONUTF8=1 && """ & pythonPath & """ app.py", 0, False
 
-' Wait for Flask to be ready (health check loop)
-WScript.Sleep 5000
+WScript.Sleep 3000
 Dim attempts
 attempts = 0
-Do While attempts < 15
+Do While attempts < 30
     WScript.Sleep 1500
     On Error Resume Next
     Set http = CreateObject("MSXML2.XMLHTTP")
@@ -63,5 +66,4 @@ Do While attempts < 15
     attempts = attempts + 1
 Loop
 
-MsgBox "Erro ao iniciar FAM App." & Chr(13) & Chr(10) & _
-       "Verifique se o Python esta instalado e tente novamente.", 16, "FAM App"
+MsgBox "Erro ao iniciar FAM App." & Chr(13) & Chr(10) & "Verifique se o Python esta instalado e tente novamente.", 16, "FAM App"
