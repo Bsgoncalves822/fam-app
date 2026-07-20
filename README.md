@@ -237,8 +237,8 @@ C40xxxxxxx / C60xxxxxxx                        → número de contrato Sicredi
 
 | Status | Linhas | % |
 |--------|--------|---|
-| OK | ~5.300 | ~43% |
-| REVISAR | ~4.600 | ~37% |
-| NAO ENCONTRADO | ~2.400 | ~20% |
+| OK |~92% |
+| REVISAR | ~8% |
+| NAO ENCONTRADO |~0% |
 
 Fontes de identificação: CADASTRO (maioria), PDF (~2.000), COMPLEMENTO (~600), RECEITA_WS (~370), FOLHA (~178), CHEQUE (~66).
